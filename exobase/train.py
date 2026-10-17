@@ -1,4 +1,4 @@
-"""Train independent t-PatchGNN/exogenous/pattern-delay baselines."""
+"""Train DAG/X-to-Y LIFT baselines (and explicit legacy t-PatchGNN variants)."""
 import argparse
 from dataclasses import asdict
 import json
@@ -14,8 +14,7 @@ from torch.utils.data import DataLoader, Subset
 from .data import (DIST_TARGETS, DIST_EXOG, load_long_table, TimeRecords,
     split_records, normalization_from_seen, IrregularCollator)
 from .metrics import masked_mse, evaluate_irregular
-from .model import ModelConfig, ExogenousTPatchGNN
-from .patterns import fit_pattern_bank
+from .model import ModelConfig, build_model
 from .prepare import sha256
 
 
@@ -27,11 +26,11 @@ def parser():
     p.add_argument('--exog', nargs='+', default=list(DIST_EXOG))
     p.add_argument('--history', type=float, default=14400, help='History duration, seconds')
     p.add_argument('--forecast', type=float, default=7200, help='Future duration, seconds')
-    p.add_argument('--patch-seconds', type=float, default=960)
+    p.add_argument('--patch-seconds', type=float, default=60)
     p.add_argument('--patch-stride', type=float, default=None, help='Seconds; defaults to patch width')
-    p.add_argument('--variant', choices=['tpatch-y', 'tpatch', 'exo', 'delay'], default='delay')
-    p.add_argument('--split', choices=['official-random', 'chronological'], default='official-random')
-    p.add_argument('--normalization', choices=['seen', 'train'], default='seen')
+    p.add_argument('--variant', choices=['dag-history', 'dag', 'dag-lift', 'tpatch-y', 'tpatch', 'exo', 'delay'], default='dag-lift')
+    p.add_argument('--split', choices=['official-random', 'chronological'], default='chronological')
+    p.add_argument('--normalization', choices=['seen', 'train'], default='train')
     p.add_argument('--batch-size', type=int, default=2)
     p.add_argument('--epochs', type=int, default=100)
     p.add_argument('--patience', type=int, default=10)
@@ -43,6 +42,16 @@ def parser():
     p.add_argument('--tf-layers', type=int, default=1)
     p.add_argument('--node-dim', type=int, default=10)
     p.add_argument('--graph-hops', type=int, default=2)
+    p.add_argument('--alpha', type=float, default=.5, help='DAG temporal/covariate mixture')
+    p.add_argument('--beta', type=float, default=.1, help='DAG masked auxiliary loss weight')
+    p.add_argument('--dropout', type=float, default=.1)
+    p.add_argument('--max-lag', type=int, default=48, help='Maximum positive X->Y lag in patch bins')
+    p.add_argument('--min-pairs', type=int, default=8, help='Minimum observed history pairs per candidate lag')
+    p.add_argument('--min-correlation', type=float, default=.3)
+    p.add_argument('--leader-num', type=int, default=3)
+    p.add_argument('--state-num', type=int, default=8)
+    p.add_argument('--refiner-mode', choices=['prefix', 'global'], default='prefix',
+        help='prefix bounds control availability per prediction bin; global uses horizon-wide mixing')
     p.add_argument('--delay-context', type=int, default=4)
     p.add_argument('--n-patterns', type=int, default=16)
     p.add_argument('--max-pattern-windows', type=int, default=20000)
@@ -75,6 +84,12 @@ def main(argv=None):
     if min(args.epochs, args.patience, args.batch_size, args.threads) < 1 or args.lr <= 0:
         p.error('Training counts and learning rate must be positive')
     args.patch_stride = args.patch_seconds if args.patch_stride is None else args.patch_stride
+    if args.variant.startswith('dag') and (args.patch_stride != args.patch_seconds
+            or not all(math.isclose(d/args.patch_seconds, round(d/args.patch_seconds))
+                       for d in (args.history, args.forecast))):
+        p.error('DAG/LIFT requires nonoverlapping patches and history/forecast aligned to the patch grid')
+    if args.variant == 'dag-lift' and round(args.history/args.patch_seconds) < args.min_pairs + 1:
+        p.error('History must contain at least min-pairs+1 patch bins for a positive lag')
     if args.variant == 'delay' and (args.patch_stride != args.patch_seconds
             or not math.isclose(args.history/args.patch_seconds, round(args.history/args.patch_seconds))):
         p.error('Patch-level DFT baseline requires nonoverlapping patches and an aligned history boundary')
@@ -107,14 +122,19 @@ def main(argv=None):
         history_patches=math.ceil(max(args.history-args.patch_seconds, 0)/args.patch_stride)+1,
         variant=args.variant, d_model=args.d_model, te_dim=args.te_dim,
         n_heads=args.n_heads, n_layers=args.n_layers, tf_layers=args.tf_layers,
-        node_dim=args.node_dim, graph_hops=args.graph_hops, delay_context=args.delay_context)
+        node_dim=args.node_dim, graph_hops=args.graph_hops, delay_context=args.delay_context,
+        future_patches=math.ceil(args.forecast/args.patch_seconds), alpha=args.alpha,
+        beta=args.beta, dropout=args.dropout, max_lag=args.max_lag, min_pairs=args.min_pairs,
+        min_correlation=args.min_correlation, leader_num=args.leader_num,
+        state_num=args.state_num, refiner_mode=args.refiner_mode)
     patterns, pattern_info = None, None
     if args.variant == 'delay':
+        from .patterns import fit_pattern_bank
         print('Fitting train-only k-Shape pattern bank', flush=True)
         patterns, pattern_info = fit_pattern_bank(records, splits['train'], make_collator(args, norm),
             len(args.targets), args.delay_context, args.n_patterns, args.max_pattern_windows, args.seed)
         np.savez_compressed(output/'patterns.npz', patterns=patterns)
-    model = ExogenousTPatchGNN(config, patterns).to(args.device)
+    model = build_model(config, patterns).to(args.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     manifest = {'args': vars(args), 'model_config': asdict(config), 'normalization': norm,
         'data_sha256': sha256(args.data_path),
@@ -124,10 +144,18 @@ def main(argv=None):
         'table_shape': list(table.values.shape), 'variable_order_y_then_x': list(table.names),
         'incomplete_tail_seconds': float(table.time[-1] % records.duration),
         'normalization_scope': 'train+validation (official seen_data)' if args.normalization == 'seen' else 'train only',
-        'known_future_x': args.variant in ('exo', 'delay'), 'pattern_bank': pattern_info,
+        'known_future_x': args.variant in ('dag', 'dag-lift', 'exo', 'delay'), 'pattern_bank': pattern_info,
+        'architecture_version': 2,
+        'backbone': 'DAG dual attention on masked patch means' if args.variant.startswith('dag') else 'legacy t-PatchGNN',
+        'lag_protocol': ({'direction': 'X->Y only', 'estimator': 'history-only masked noncircular Pearson',
+            'positive_lags_only': True, 'max_lag_seconds': args.max_lag*args.patch_seconds,
+            'refiner_mode': args.refiner_mode, 'future_x_bypass': False,
+            'learned_lag_estimator': False} if args.variant == 'dag-lift' else None),
         'smoke_test': args.max_records is not None,
         'sources': {'tpatchgnn': '00c94e7bbaf21c71b03ed84ff690ae59e37129e5',
                     'dag_data_adapter': 'f4468901331f53bb84bbc405219150df997e26c5',
+                    'dag_model': 'f4468901331f53bb84bbc405219150df997e26c5',
+                    'lift': '79cf8f157bb9a616c9733daf1e9c2cfefdc98c94',
                     'pdformer': 'f8c8f6ad007a04fad3baee958b89504711852ce9'}}
     (output/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     print('Variant:', args.variant, 'records:', {k: len(v) for k, v in splits.items()},
@@ -167,6 +195,10 @@ def main(argv=None):
     results = {'best_epoch': best_epoch, 'best_validation_mse': best, 'test': test,
         'training_history': history, 'smoke_test': args.max_records is not None}
     (output/'metrics.json').write_text(json.dumps(results, indent=2, allow_nan=False))
+    if args.variant == 'dag-lift':
+        from .lag_export import export_lags
+        export_lags(model, loaders['test'], args.device, output/'test_lags.csv',
+                    args.targets, args.exog, args.patch_seconds)
     print('Test:', json.dumps(test), flush=True)
     return results
 

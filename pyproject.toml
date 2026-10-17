@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "exo-base-model"
-version = "0.1.0"
-description = "t-PatchGNN for irregular exogenous forecasting with PDFormer-style pattern retrieval"
+version = "0.2.0"
+description = "Real-time irregular patches, DAG dual attention and directed exogenous LIFT forecasting"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "pandas>=2.0", "torch>=2.4", "scikit-learn>=1.3", "tslearn>=0.6.3"]
+dependencies = ["numpy>=1.24", "pandas>=2.0", "torch>=2.4", "scikit-learn>=1.3"]
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+test = ["pytest>=8", "tslearn>=0.6.3"]
+legacy = ["tslearn>=0.6.3"]
 
 [project.scripts]
 exo-train = "exobase.train:cli"

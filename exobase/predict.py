@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from .data import load_long_table, TimeRecords
-from .model import ExogenousTPatchGNN, ModelConfig
+from .model import build_model, ModelConfig
 from .prepare import sha256
 from .train import make_collator
 
@@ -22,12 +22,17 @@ def main(argv=None):
     p.add_argument('--device', default='cpu')
     p.add_argument('--threads', type=int, default=2)
     p.add_argument('--output', required=True)
+    p.add_argument('--lag-output', help='Optional history-only X->Y lag diagnostic CSV (dag-lift only)')
     p.add_argument('--overwrite', action='store_true')
     args = p.parse_args(argv)
     if args.threads < 1:
         p.error('threads must be positive')
     if Path(args.output).exists() and not args.overwrite:
         p.error('Output exists; choose another path or use --overwrite')
+    if args.lag_output and Path(args.lag_output).exists() and not args.overwrite:
+        p.error('Lag output exists; choose another path or use --overwrite')
+    if args.lag_output and Path(args.lag_output).resolve() == Path(args.output).resolve():
+        p.error('Prediction and lag output paths must differ')
     torch.set_num_threads(args.threads)
     saved = torch.load(args.checkpoint, map_location='cpu', weights_only=True)
     manifest = saved['manifest']
@@ -46,7 +51,9 @@ def main(argv=None):
         collate_fn=make_collator(settings, manifest['normalization']))
     config = ModelConfig(**manifest['model_config'])
     patterns = saved['state_dict'].get('memory.patterns')
-    model = ExogenousTPatchGNN(config, patterns).to(args.device)
+    if args.lag_output and config.variant != 'dag-lift':
+        p.error('--lag-output requires a dag-lift checkpoint')
+    model = build_model(config, patterns).to(args.device)
     model.load_state_dict(saved['state_dict']); model.eval()
     n = config.target_dim
     low = np.asarray(manifest['normalization']['data_min'])[:n]
@@ -71,6 +78,10 @@ def main(argv=None):
                             int(mask[b,q,j]), float(actual[b,q,j]) if mask[b,q,j] else ''])
                         count += 1
     print(f'Exported {count} predictions to {destination}')
+    if args.lag_output:
+        from .lag_export import export_lags
+        export_lags(model, loader, args.device, args.lag_output,
+                    settings.targets, settings.exog, settings.patch_seconds)
     return count
 
 

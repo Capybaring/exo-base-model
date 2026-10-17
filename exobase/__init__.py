@@ -1,2 +1,2 @@
-"""Irregular forecasting with exogenous variables on a t-PatchGNN backbone."""
-__version__ = "0.1.0"
+"""Irregular patches with DAG forecasting and directed exogenous LIFT."""
+__version__ = "0.2.0"

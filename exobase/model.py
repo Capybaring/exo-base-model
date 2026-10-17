@@ -1,10 +1,10 @@
-"""Official t-PatchGNN backbone plus optional known-future-X fusion.
+"""Shared config/factory and the explicitly retained legacy t-PatchGNN models.
 
-There are no DAG model imports. The base encoder, graph learning, graph
-convolution and query decoder are inherited from the pinned upstream model.
+New default training routes to dag_model.py. Legacy classes below preserve
+old checkpoints and comparisons; their graphs are NOT used by DAG variants.
 """
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import torch
@@ -18,7 +18,7 @@ class ModelConfig:
     target_dim: int
     exog_dim: int
     history_patches: int
-    variant: str = 'delay'
+    variant: str = 'dag-lift'
     d_model: int = 64
     te_dim: int = 10
     n_heads: int = 4
@@ -27,6 +27,16 @@ class ModelConfig:
     node_dim: int = 10
     graph_hops: int = 2
     delay_context: int = 4
+    future_patches: int = 0
+    alpha: float = .5
+    beta: float = .1
+    dropout: float = .1
+    max_lag: int = 48
+    min_pairs: int = 8
+    min_correlation: float = .3
+    leader_num: int = 3
+    state_num: int = 8
+    refiner_mode: str = 'prefix'
 
 
 class TPatchBackbone(tPatchGNN):
@@ -68,7 +78,7 @@ class TPatchBackbone(tPatchGNN):
 
 
 def scalar_patch_means(values, mask):
-    """Fixed-duration mean descriptors, solely for the PDFormer-style branch."""
+    """Observed means/masks per fixed-duration bin, returned as [B,C,K]."""
     valid = mask.bool()
     safe = torch.where(valid, values, torch.zeros_like(values))
     count = valid.sum(dim=2)
@@ -189,3 +199,13 @@ class ExogenousTPatchGNN(nn.Module):
         time = te[:, None].expand(-1, c.target_dim, -1, -1)
         prediction = self.backbone.decoder(torch.cat([y, time], -1)).squeeze(-1).transpose(1, 2)
         return prediction.contiguous(), prediction.new_zeros(())
+
+
+def build_model(config, patterns=None):
+    """Route modern DAG/LIFT models and explicitly retained legacy baselines."""
+    if isinstance(config, dict):
+        config = ModelConfig(**config)
+    if config.variant in ('dag-history', 'dag', 'dag-lift'):
+        from .dag_model import DAGExogenousForecast
+        return DAGExogenousForecast(config)
+    return ExogenousTPatchGNN(config, patterns)

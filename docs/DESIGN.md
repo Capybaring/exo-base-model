@@ -1,70 +1,112 @@
-# 方法和适配边界
+# DAG + 外生领先关系：公式与适配边界
 
-## 结构
+## 1. 任务与 Patch 接口
 
-```text
-长表观测 (time, variable, value)
-  -> 时间并集 + [Y,X] 值/mask
-  -> 非重叠独立记录 + 真实预测查询
-  -> 真实时间区间 PatchBuilder
-  -> t-PatchGNN LearnableTE + TTCN
-  -> t-PatchGNN 时间 Transformer + 时间自适应图 + 图卷积
-  -> 历史状态 + 查询时间的原版 MLP 解码器
-       ^
-       | exo/delay: 外生上下文加到目标历史状态
-       |
-  已知未来 X -> 共享 TTCN -> X-to-Y 通道注意力
-                               ^
-                               | delay: Key += 检索到的模式表示
-  X 的固定时间 Patch 均值窗口 -> 训练集 k-Shape 模式库
-```
+X 是已知未来的控制/协变量，Y 是待预测过程量。起点 T 后不读取未来 Y；候选方向限定为 X_i(s)→Y_j(s+δ_ji)，δ>0。
 
-`TPatchBackbone` 封装历史编码；`PatternMemory` 封装 DFT；`ExogenousTPatchGNN` 连接主干与融合。未来可替换历史编码或融合方式，保持 `exobase.data` 的观测/时间/mask/查询契约。当前 X→Y 注意力沿用此前外生预测的思路作为临时 baseline，不宣称已经完成最优主干设计。
+固定真实时间窗口 I_p=[pΔ,(p+1)Δ)，定义：
 
-## t-PatchGNN 的保留部分
+\[
+v_{c,p}=\frac{\sum_{t\in I_p}m_c(t)v_c(t)}{\max(1,\sum_{t\in I_p}m_c(t))},\quad
+M_{c,p}=\mathbf1[\sum_{t\in I_p}m_c(t)>0].
+\]
 
-Patch 归属由真实时间范围确定，同一个时间区间每变量可以有不同数量的观测。输出 `[B,K,L,C]`，L 是 batch 内每块每变量最大有效观测数，padding 不算观测。TE 为线性分量与可学习正弦分量；TTCN 沿块内观测维生成、归一化滤波权重，附加块有效标志。
+exobase/data.py 的 pack_patches 负责和 t-PatchGNN 一样的物理时间归属；model.py 的 scalar_patch_means 形成规则标量接口。当前保留分块思想，不使用 TTCN/GNN。块内均值丢弃部分细节，是明确的 baseline 简化；全空块保留位置和 mask。
 
-历史主干直接基于官方类：每层时间 Transformer -> 动态节点嵌入与邻接学习 -> GNN，保留后续层的残差、Linear 时间聚合和时间查询解码器。`upstream_model.py` 只删除未使用的可选导入，取消节点参数初始化时的强制 `.cuda()`。子类 TTCN 增加隐藏 NaN 清除、空块清零和安全归一化；其它历史计算沿用官方实现。
+DAG 输入空单元用该变量该记录历史有效块均值填充，全空历史变量填 0。未来 X 空单元用历史 X 均值。填充仅为适配稠密接口，不成为滞后估计样本。
 
-原版的 Transformer/GNN 可以保留和建模空时间块，空块不会从序列中删除。这里没有新增强制的自回归因果 Transformer mask；历史编码器只接收预测起点前的 Y/X。
+## 2. DAG 双分支
 
-默认 patch stride=width。非 delay 模式支持重叠时间 Patch。为了让 DFT 的每个窗口偏移对应同一物理时间步，第一版 delay 要求非重叠且 history 边界对齐 Patch 网格。
+代码：exobase/dag_model.py、exobase/dag_layers/。保留原 TemporalCausalityEncoder、CovCausalityEncoder、投影器、注意力迁移/门控、归一化和组合：
 
-## 外生融合（当前的独立设计选择）
+\[
+\widehat Y^{base}=\alpha\widehat Y^{temporal}+(1-\alpha)\widehat Y^{covariate}.
+\]
 
-令历史主干输出每变量状态 s，已知未来 X 的对应 Patch token 为 H。对预测查询 h，选最新起点且覆盖该查询的未来 Patch（最后一块做边界截断）。
+时间分支分别处理 X/Y 历史；外生编码器在 X 上学习预测任务，其注意力参数用于目标侧时间依赖建模。其 X 预测值仅依赖 X 历史。变量分支保留外生历史重构 Y、外生未来预测 Y 的机制。Y 历史统计量可条件化目标预测，不构成一个 Y→X 预测分支。
 
-```text
-u_i,h = H_i,patch(h) + W_history s_Xi + e_Xi
-q_j,h = Wq (s_Yj + W_time TE(t_h))
-k_i,h = Wk u_i,h
-v_i,h = Wv u_i,h
-alpha_j,h,i = masked_softmax_i(q_j,h dot k_i,h / sqrt(d))
-context_j,h = sum_i alpha_j,h,i v_i,h
-prediction_j,h = upstream_decoder([s_Yj + context_j,h, TE(t_h)])
-```
+历史长度 L、预测长度 H 均以块计。原 DAG 时间 PatchEmbedding 设 patch_len=stride=1，仅投影已有标量块，不再合并多块；其原有最终边界复制 token 保留。滞后估计只使用 L 个真实时间块，不包含复制 token。
 
-当前 future X encoder 与历史主干共享 TTCN。历史 Y/X 共同进入动态图，不强制单向图。仅 tpatch-y 禁用历史 X，tpatch 禁用未来 X，exo 与 delay 假设未来 X 在预测时已知；仍保留其原始观测缺失 mask。若某查询对应未来 X 全空，外生上下文为零。
+| 变体 | 变量分支未来输入 | 修正 |
+|---|---|---|
+| dag-history | 时间分支预测的 X | 无 |
+| dag | 已知未来 X | 无 |
+| dag-lift | 时间分支预测的 X | 已知 X 经正时延对齐后进入 LIFT |
 
-这不是原 DAG 的双相关网络，也不声称是完整 t-PatchGNN/PDFormer 原模型；它是可替换的外生融合 baseline。
+对 dag-history/dag-lift，预测 X 路径在训练和推理一致，基础预测不依赖实际未来 X，避免未对齐输入绕过滞后分支。dag 保留直接未来 X 的原方法对照。
 
-## PDFormer 式 DFT 的迁移
+未来 X 可监督外生预测任务，历史 Y 监督变量分支重构，各自使用真实 mask：
 
-保留原方法的三个核心步骤：训练窗口聚类得到模式库、当前窗口对模式库的注意力检索、检索结果只加到 Key。没有使用上一版的“窗口 token 展平 -> MLP -> 同时加 Key/Value”。
+\[
+\mathcal L=\operatorname{MaskedMSE}_{query}(\widehat Y,Y)
++\beta[\operatorname{MaskedMSE}(\widehat X^{temporal},X_{future})
++\operatorname{MaskedMSE}(\widehat Y^{covariate}_{history},Y_{history})].
+\]
 
-原 PDFormer 窗口是规则采样原始值。本实现的**明确改编**是：每个固定真实时间 Patch 对有效 X 值求均值，得到标量序列；连续 S 个标量构成窗口，包含当前块。主路径的 TTCN 仍使用全部原始观测与时间，不插值。全空块保持在原位置，任何缺少一块的窗口不做模式检索，不跨空缺拼接。忽略恒定候选窗口，训练与推理均对窗口做 z-normalization。多个外生变量共享模式库，候选窗口来自所有训练记录的 X。
+不将 Y 作为外生预测输入，不在 [Y,X] 上学习双向动态图。未来 Y 及标签 mask 不进入 forward。
 
-训练集候选窗口使用确定性的 reservoir sampling 限制数量，k-Shape 聚类得到固定标量模式；这些模式随模型保存为 buffer，投影参数与模型联合训练。窗口是数据统计量，不随隐藏编码器坐标改变，避免“用训练前 token 聚类、训练后坐标漂移”的问题。若没有完整非恒定候选窗口会明确报错，不能静默伪造模式库。
+## 3. X→Y 领先估计
 
-注意力检索的 Query 来自当前 X 的窗口，Key/Value 来自模式库。检索结果加到 X→Y 注意力的 Key，Value 保持基础定义。模式库检索中的 Value 与 X→Y 注意力的 Value 是两套变量。
+代码：exobase/lags.py::estimate_leads。每条记录、每个 Y_j/X_i、每个正时延 ℓ，仅使用同时有效的历史配对：
 
-DFT 窗口跨越历史/已知未来 X 的边界。它提供滞后相关的窗口特征，不输出真实成对时延，也不提供因果识别保证。同一未来 Patch 内可使用晚于当前 Y 查询的 X，因为该分支明确假设整个未来 X 已知。若研究严格的时间点滞后，需要另加查询级时间约束，当前版本没有宣称实现这一目标。
+\[
+\Omega_{ji}(\ell)=\{s:s<L,\ s-\ell\ge0,\ M^Y_{j,s}M^X_{i,s-\ell}=1\},
+\]
 
-## 数据协议
+\[
+\rho_{ji}(\ell)=\operatorname{Pearson}_{s\in\Omega_{ji}(\ell)}(Y_{j,s},X_{i,s-\ell}),\qquad
+\widehat\delta_{ji}=\arg\max_{1\le\ell\le L_{max}}|\rho_{ji}(\ell)|.
+\]
 
-连续工业流不是天然独立个体数据；这里显式切成非重叠完整记录，记录切分方式属于本项目的任务适配。随机独立记录协议可用于与上游 seen/test 流程对应，chronological 则用于时间外推。不要混用两种划分的结果。
+要求有效配对数≥min_pairs、两侧非恒定；最大绝对相关低于 min_correlation 则拒绝该变量对。每个目标只在有效 X 中取 top-K，没有有效来源则不修正。相关相同优先较短滞后。
 
-长表的重复同变量同时间取均值，真实零值保留 mask=True。日期时间保留到整数纳秒后减统一原点，避免 pandas 不同时间精度导致单位错误；数值时间按相对秒解释，不压缩间隔。训练/验证/测试都在有 Y 标签的位置监督评估，未来 Y 及其 mask 不被模型 forward 读取。
+与 LIFT 官方估计器不同：采用非循环、有限重叠、逐候选重新中心化的 mask-aware Pearson。不绕回边界、不跨空缺拼接、不以填充值估计，不使用原代码的局部峰值筛选，也不使用额外记录历史。默认假设领先关系在当前记录预测区间近似稳定。
 
-BE/NP 默认按每个变量观测独立删除 30%，不是删除相同的整行时刻。相同 seed 在相同排列的源文件上产生相同随机序列，方便复现；不同缺失实验必须保存其 preparation manifest。DIST 原有不规则性不再叠加随机删除。
+estimate_lags 只需 observed_data/observed_mask，不需要任何未来字段。估计器无学习参数，不对 argmax 反向传播。相关峰值不等于已识别的纯延迟、响应起始时间或物理因果边。
+
+## 4. 已知未来 X 对齐
+
+未来目标块 h=0,...,H-1，取：
+
+\[
+Z_{ji,h}=\operatorname{sign}(\rho_{ji})\widetilde X_{i,L+h-\widehat\delta_{ji}}.
+\]
+
+将 X 历史与已知未来拼接，使用每个 X 的历史均值/标准差归一化；缺失位置在归一化尺度填 0，保留可用性 mask。索引<L 使用历史，否则使用已知未来 X，无需先预测这些已知控制量。
+
+例如 δ=3 时，未来 X 第 5 块改变，最早影响未来 Y 第 8 块（从 0 计数）。该时间边界通过自动测试。
+
+## 5. LIFT 频域修正及 prefix 适配
+
+保留官方 FilterFactory/ComplexLinear。状态概率来自 Y 历史和目标状态参数；相关强度驱动 2K+1 组状态相关滤波器。三路信号沿用官方实现：
+
+\[
+U_k=\mathcal F(Z_{jk})\odot r_{U,k},\quad
+D_k=(U_k-\mathcal F(\widehat Y_j^{base}))\odot r_{D,k},\quad
+V=\mathcal F(\widehat Y_j^{base})\odot r_V,
+\]
+
+\[
+\widehat Y_j=\widehat Y_j^{base}
++\mathcal F^{-1}(W_{complex}[\sum_kU_k,\sum_kD_k,V]+b).
+\]
+
+在 Y 历史归一化尺度计算，再将残差变回 Y 尺度。基础预测和修正共同训练，温度下界 0.05，防止除零。
+
+全预测区间频域混合会让晚时刻控制影响较早输出；默认 prefix 模式对每个 h 独立构造：
+
+\[
+Z^{(h)}_{ji,u}=Z_{ji,u}\mathbf1[u\le h].
+\]
+
+用相同滤波器及完整基础预测运行修正，仅取第 h 个输出。基础预测和滤波器仅依赖历史，因此该输出不依赖 X_i 在 L+h-δ_ji 之后的实际未来数值。过去控制对多个后续时刻的持续影响仍可学习；前缀无可用领先输入时残差为 0。
+
+这是本场景的额外时间约束，不是未经修改的原始 LIFT。global 模式省略 prefix，供对照，不作逐输出时间边界保证。prefix 的控制中间量约为 O(B·Y·K·H²)，长预测区间需注意计算规模。
+
+## 6. 查询与解释边界
+
+块预测映射回原始未来查询，每块内预测相同。主损失在真实观测的 Y 查询计算，保留不规则评估；不同块观测数不同，因此不是每块等权损失。
+
+默认 chronological + train-only scaling，随机独立记录/seen 缩放仍可选。完整记录不重叠，跳过无历史、无未来标签及不完整尾段并报告。
+
+已知未来 X 是任务条件。闭环控制量未必统计外生，这里施加 X→Y 的预测结构先验，并未完成干预因果识别。时延尺度为 Δ；块内细节、变化工况、非线性与多控制量混杂仍需专门验证。
