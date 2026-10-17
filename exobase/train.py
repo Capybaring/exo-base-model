@@ -1,0 +1,179 @@
+"""Train independent t-PatchGNN/exogenous/pattern-delay baselines."""
+import argparse
+from dataclasses import asdict
+import json
+import math
+from pathlib import Path
+import random
+import time
+
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, Subset
+
+from .data import (DIST_TARGETS, DIST_EXOG, load_long_table, TimeRecords,
+    split_records, normalization_from_seen, IrregularCollator)
+from .metrics import masked_mse, evaluate_irregular
+from .model import ModelConfig, ExogenousTPatchGNN
+from .patterns import fit_pattern_bank
+from .prepare import sha256
+
+
+def parser():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--config', help='JSON preset; explicit command-line values override it')
+    p.add_argument('--data-path')
+    p.add_argument('--targets', nargs='+', default=list(DIST_TARGETS))
+    p.add_argument('--exog', nargs='+', default=list(DIST_EXOG))
+    p.add_argument('--history', type=float, default=14400, help='History duration, seconds')
+    p.add_argument('--forecast', type=float, default=7200, help='Future duration, seconds')
+    p.add_argument('--patch-seconds', type=float, default=960)
+    p.add_argument('--patch-stride', type=float, default=None, help='Seconds; defaults to patch width')
+    p.add_argument('--variant', choices=['tpatch-y', 'tpatch', 'exo', 'delay'], default='delay')
+    p.add_argument('--split', choices=['official-random', 'chronological'], default='official-random')
+    p.add_argument('--normalization', choices=['seen', 'train'], default='seen')
+    p.add_argument('--batch-size', type=int, default=2)
+    p.add_argument('--epochs', type=int, default=100)
+    p.add_argument('--patience', type=int, default=10)
+    p.add_argument('--lr', type=float, default=.001)
+    p.add_argument('--d-model', type=int, default=64)
+    p.add_argument('--te-dim', type=int, default=10)
+    p.add_argument('--n-heads', type=int, default=4)
+    p.add_argument('--n-layers', type=int, default=1)
+    p.add_argument('--tf-layers', type=int, default=1)
+    p.add_argument('--node-dim', type=int, default=10)
+    p.add_argument('--graph-hops', type=int, default=2)
+    p.add_argument('--delay-context', type=int, default=4)
+    p.add_argument('--n-patterns', type=int, default=16)
+    p.add_argument('--max-pattern-windows', type=int, default=20000)
+    p.add_argument('--seed', type=int, default=1)
+    p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+    p.add_argument('--threads', type=int, default=2)
+    p.add_argument('--max-records', type=int, help='Smoke test only: restrict before splitting/scaling')
+    p.add_argument('--save-path', default='results/run')
+    p.add_argument('--overwrite', action='store_true')
+    return p
+
+
+def make_collator(args, normalization):
+    return IrregularCollator(args.history, args.forecast, args.patch_seconds,
+        len(args.targets), normalization, seed=args.seed, patch_stride=args.patch_stride)
+
+
+def main(argv=None):
+    p = parser()
+    preliminary, _ = p.parse_known_args(argv)
+    if preliminary.config:
+        settings = json.loads(Path(preliminary.config).read_text())
+        unknown = set(settings)-{a.dest for a in p._actions}
+        if unknown:
+            p.error(f'Unknown configuration settings: {sorted(unknown)}')
+        p.set_defaults(**settings)
+    args = p.parse_args(argv)
+    if not args.data_path:
+        p.error('--data-path or a preset containing data_path is required')
+    if min(args.epochs, args.patience, args.batch_size, args.threads) < 1 or args.lr <= 0:
+        p.error('Training counts and learning rate must be positive')
+    args.patch_stride = args.patch_seconds if args.patch_stride is None else args.patch_stride
+    if args.variant == 'delay' and (args.patch_stride != args.patch_seconds
+            or not math.isclose(args.history/args.patch_seconds, round(args.history/args.patch_seconds))):
+        p.error('Patch-level DFT baseline requires nonoverlapping patches and an aligned history boundary')
+    output = Path(args.save_path)
+    if not args.overwrite and (output/'best_model.pt').exists():
+        p.error('Checkpoint exists; choose a new --save-path or explicitly use --overwrite')
+    output.mkdir(parents=True, exist_ok=True)
+    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.set_num_threads(args.threads)
+    print('Loading:', args.data_path, flush=True)
+    table = load_long_table(args.data_path, args.targets, args.exog)
+    records = TimeRecords(table, args.history, args.forecast, len(args.targets))
+    full_count = len(records)
+    if args.max_records is not None:
+        if args.max_records < 5:
+            p.error('max-records must be at least five')
+        records.records = records.records[:args.max_records]
+    splits = split_records(records, args.split)
+    scale_ids = splits['train']+(splits['val'] if args.normalization == 'seen' else [])
+    norm = normalization_from_seen(records, scale_ids)
+    loaders = {name: DataLoader(Subset(records, indices), batch_size=args.batch_size,
+        shuffle=name == 'train', drop_last=False, num_workers=0,
+        collate_fn=make_collator(args, norm), generator=torch.Generator().manual_seed(args.seed))
+        for name, indices in splits.items()}
+    config = ModelConfig(target_dim=len(args.targets), exog_dim=len(args.exog),
+        history_patches=math.ceil(max(args.history-args.patch_seconds, 0)/args.patch_stride)+1,
+        variant=args.variant, d_model=args.d_model, te_dim=args.te_dim,
+        n_heads=args.n_heads, n_layers=args.n_layers, tf_layers=args.tf_layers,
+        node_dim=args.node_dim, graph_hops=args.graph_hops, delay_context=args.delay_context)
+    patterns, pattern_info = None, None
+    if args.variant == 'delay':
+        print('Fitting train-only k-Shape pattern bank', flush=True)
+        patterns, pattern_info = fit_pattern_bank(records, splits['train'], make_collator(args, norm),
+            len(args.targets), args.delay_context, args.n_patterns, args.max_pattern_windows, args.seed)
+        np.savez_compressed(output/'patterns.npz', patterns=patterns)
+    model = ExogenousTPatchGNN(config, patterns).to(args.device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    manifest = {'args': vars(args), 'model_config': asdict(config), 'normalization': norm,
+        'data_sha256': sha256(args.data_path),
+        'record_ids': {name: [records.records[i][0] for i in ids] for name, ids in splits.items()},
+        'record_indices': splits, 'records_before_smoke_limit': full_count,
+        'skipped_empty_records': records.skipped, 'duplicates_merged': table.duplicate_rows,
+        'table_shape': list(table.values.shape), 'variable_order_y_then_x': list(table.names),
+        'incomplete_tail_seconds': float(table.time[-1] % records.duration),
+        'normalization_scope': 'train+validation (official seen_data)' if args.normalization == 'seen' else 'train only',
+        'known_future_x': args.variant in ('exo', 'delay'), 'pattern_bank': pattern_info,
+        'smoke_test': args.max_records is not None,
+        'sources': {'tpatchgnn': '00c94e7bbaf21c71b03ed84ff690ae59e37129e5',
+                    'dag_data_adapter': 'f4468901331f53bb84bbc405219150df997e26c5',
+                    'pdformer': 'f8c8f6ad007a04fad3baee958b89504711852ce9'}}
+    (output/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+    print('Variant:', args.variant, 'records:', {k: len(v) for k, v in splits.items()},
+          'parameters:', sum(x.numel() for x in model.parameters()), flush=True)
+    best, best_epoch, best_state, stale, history = float('inf'), 0, None, 0, []
+    for epoch in range(args.epochs):
+        model.train(); start = time.perf_counter(); steps = 0
+        for index, batch in enumerate(loaders['train']):
+            batch = {k: v.to(args.device) for k, v in batch.items()}
+            optimizer.zero_grad()
+            prediction, auxiliary = model(batch)
+            loss = masked_mse(prediction, batch['data_to_predict'], batch['mask_predicted_data'])
+            if loss is None:
+                continue
+            total = loss+auxiliary
+            if not torch.isfinite(total):
+                raise ValueError('Nonfinite training loss')
+            total.backward(); optimizer.step(); steps += 1
+            if index == 0 or (index+1) % 50 == 0:
+                print(f'Epoch {epoch+1} batch {index+1}/{len(loaders["train"])} MSE={float(total.detach()):.6f}', flush=True)
+        if not steps:
+            raise ValueError('No observed training targets')
+        val = evaluate_irregular(model, loaders['val'], args.device)
+        history.append({'epoch': epoch+1, 'validation': val})
+        print(f'Epoch {epoch+1} val MSE={val["mse"]:.6f} MAE={val["mae"]:.6f} seconds={time.perf_counter()-start:.1f}', flush=True)
+        if val['mse'] < best:
+            best, best_epoch, stale = val['mse'], epoch+1, 0
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            torch.save({'state_dict': best_state, 'manifest': manifest, 'best_epoch': best_epoch,
+                'best_validation_mse': best}, output/'best_model.pt')
+        else:
+            stale += 1
+        if stale >= args.patience:
+            break
+    model.load_state_dict(best_state)
+    test = evaluate_irregular(model, loaders['test'], args.device)
+    results = {'best_epoch': best_epoch, 'best_validation_mse': best, 'test': test,
+        'training_history': history, 'smoke_test': args.max_records is not None}
+    (output/'metrics.json').write_text(json.dumps(results, indent=2, allow_nan=False))
+    print('Test:', json.dumps(test), flush=True)
+    return results
+
+
+def cli():
+    main()
+
+
+if __name__ == '__main__':
+    main()

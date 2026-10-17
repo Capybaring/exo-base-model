@@ -1,0 +1,11 @@
+{
+  "data_path": "data/processed/NP.npz",
+  "targets": ["OT"],
+  "exog": [" Grid load forecast", " Wind power forecast"],
+  "history": 604800,
+  "forecast": 86400,
+  "patch_seconds": 86400,
+  "batch_size": 16,
+  "variant": "delay",
+  "save_path": "results/NP/delay"
+}
