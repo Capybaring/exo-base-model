@@ -1,0 +1,27 @@
+{
+  "data_path": "data/processed/table3_irregular/Energy.npz",
+  "targets": [
+    "Thermoelectric"
+  ],
+  "exog": [
+    "Battery",
+    "Geothermal",
+    "Hydroelectric",
+    "Solar",
+    "Wind"
+  ],
+  "history": 604800,
+  "forecast": 86400,
+  "patch_seconds": 3600,
+  "batch_size": 16,
+  "variant": "dag-lift",
+  "save_path": "results/table3_irregular/Energy/dag-lift_short",
+  "split": "chronological",
+  "normalization": "train",
+  "max_lag": 48,
+  "min_pairs": 24,
+  "min_correlation": 0.3,
+  "leader_num": 3,
+  "state_num": 8,
+  "refiner_mode": "prefix"
+}

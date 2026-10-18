@@ -1,0 +1,38 @@
+{
+  "data_path": "data/processed/DIST.npz",
+  "targets": [
+    "FIC05.PV",
+    "FIC09.PV",
+    "FIC11.PV",
+    "LIC02.PV",
+    "LIC03.PV",
+    "LIC04.PV",
+    "LIC05.PV",
+    "LIC06.PV",
+    "LIC12.PV"
+  ],
+  "exog": [
+    "FIC05.OP",
+    "FIC09.OP",
+    "FIC11.OP",
+    "LIC02.OP",
+    "LIC03.OP",
+    "LIC04.OP",
+    "LIC05.OP",
+    "LIC06.OP",
+    "LIC12.OP"
+  ],
+  "history": 14400,
+  "forecast": 7200,
+  "patch_seconds": 60,
+  "batch_size": 2,
+  "variant": "dag-lift",
+  "save_path": "results/DIST/dag-lift",
+  "split": "chronological",
+  "normalization": "train",
+  "max_lag": 60,
+  "min_pairs": 16,
+  "leader_num": 3,
+  "state_num": 8,
+  "refiner_mode": "prefix"
+}

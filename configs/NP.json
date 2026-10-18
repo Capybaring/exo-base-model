@@ -1,0 +1,23 @@
+{
+  "data_path": "data/processed/NP.npz",
+  "targets": [
+    "OT"
+  ],
+  "exog": [
+    " Grid load forecast",
+    " Wind power forecast"
+  ],
+  "history": 604800,
+  "forecast": 86400,
+  "patch_seconds": 3600,
+  "batch_size": 16,
+  "variant": "dag-lift",
+  "save_path": "results/NP/dag-lift",
+  "split": "chronological",
+  "normalization": "train",
+  "max_lag": 48,
+  "min_pairs": 24,
+  "leader_num": 3,
+  "state_num": 8,
+  "refiner_mode": "prefix"
+}

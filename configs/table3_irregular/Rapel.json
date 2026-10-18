@@ -1,0 +1,24 @@
+{
+  "data_path": "data/processed/table3_irregular/Rapel.npz",
+  "targets": [
+    "Water_Level_daily_avg"
+  ],
+  "exog": [
+    "Afluente (m3/seg)_daily_avg",
+    "Precipitation_daily_sum"
+  ],
+  "history": 5184000,
+  "forecast": 864000,
+  "patch_seconds": 86400,
+  "batch_size": 16,
+  "variant": "dag-lift",
+  "save_path": "results/table3_irregular/Rapel/dag-lift_short",
+  "split": "chronological",
+  "normalization": "train",
+  "max_lag": 30,
+  "min_pairs": 16,
+  "min_correlation": 0.3,
+  "leader_num": 3,
+  "state_num": 8,
+  "refiner_mode": "prefix"
+}
