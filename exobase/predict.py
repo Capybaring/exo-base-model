@@ -49,7 +49,7 @@ def main(argv=None):
         p.error('Record boundaries differ from the saved split')
     loader = DataLoader(Subset(records, ids), batch_size=settings.batch_size,
         collate_fn=make_collator(settings, manifest['normalization']))
-    config = ModelConfig(**manifest['model_config'])
+    config = ModelConfig.from_saved(manifest['model_config'])
     patterns = saved['state_dict'].get('memory.patterns')
     if args.lag_output and config.variant != 'dag-lift':
         p.error('--lag-output requires a dag-lift checkpoint')

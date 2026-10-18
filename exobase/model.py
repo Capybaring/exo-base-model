@@ -36,10 +36,19 @@ class ModelConfig:
     min_correlation: float = .3
     leader_num: int = 3
     state_num: int = 8
-    refiner_mode: str = 'prefix'
+    refiner_mode: str = 'global'
+    lag_estimator: str = 'fft'
     # Missing from v2 checkpoint configs: retain their scalar-mean architecture.
     # New training explicitly selects ttcn in train.py.
     patch_encoder: str = 'mean'
+
+    @classmethod
+    def from_saved(cls, settings):
+        """Older checkpoints predate FFT estimation; preserve their selection."""
+        settings = dict(settings)
+        settings.setdefault('lag_estimator', 'pearson')
+        settings.setdefault('refiner_mode', 'prefix')
+        return cls(**settings)
 
 
 class TPatchBackbone(tPatchGNN):

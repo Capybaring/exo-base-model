@@ -23,9 +23,11 @@ upstream/dag/ 保存固定提交的 DAGModel 及五个依赖原文件。exobase/
 
 upstream/lift/ 保留官方 models/LIFT.py、util/lead_estimate.py、README 原内容，不含数据或 Git 历史。exobase/lift_layers.py 只提取 FilterFactory、ComplexLinear，类体不变。
 
-exobase/lags.py 是迁移实现：X→Y 限制、非循环有限窗口带 mask Pearson、已知未来 X、三路频域混合及 prefix 时间约束。不能声称估计器和官方 FFT 代码数值等价，也不声称原论文未经修改的复现。
+exobase/lead_estimator.py 恢复该固定提交的 efficient FFT/局部峰值/Top-K 机制，限制候选为 X→Y；完整标量输入的来源、lag 和相关与官方数值一致。默认不使用旧的相关阈值、最少配对数和 max_lag 截断。缺失 patch 在归一化尺度填 0，未定义通道排除；不声称缺失情形与原官方稠密输入等价。
 
-exobase/token_lift.py 是 v3 向量适配：历史 TTCN 特征逐通道中心化后计算联合相关；原始常量来源在 token_dag.py 排除。完整特征保留，FFT 沿时间轴；同一组状态相关频率滤波器应用于各特征。单特征情形与 v2 LIFT 两种模式数值一致，作为回归检查。prefix 约束仍限定 patch 级控制影响，不能解释为已识别的物理因果延迟。
+exobase/lags.py 和 token_lift.py 默认使用上述估计与 global 修正。状态相关滤波、直接温度、三路频谱、残差及对齐支路 no_grad 对齐当前官方；无效 leader 槽位额外安全屏蔽。原非循环 Pearson 和 prefix 保留为显式消融。
+
+TTCN 多特征相关是逐特征时间中心化、变量联合 RMS 后的共享特征频谱乘积均值；FFT 沿时间轴，不改变 patch 编码或完整向量。原始常量来源在 token_dag.py 排除。状态分类器读取完整历史，滤波器和复数混合层在特征间共享；P=1 退化与官方数值对照。任务/向量适配仍不等于原论文完整复现。详见 [LIFT 官方对齐说明](LIFT_OFFICIAL.md)。
 
 官方 README 说明论文提交后调整过代码且尚未重跑全部实验，因此明确固定提交。此提交无根 LICENSE 文件，保留作者/来源，不另行声称代码授权。
 

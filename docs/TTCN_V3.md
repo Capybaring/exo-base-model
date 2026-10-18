@@ -16,16 +16,13 @@ dag-history/dag-lift 的基础预测器只读取历史。时间分支预测未�
 
 ## 滞后估计与 LIFT
 
-对每个候选正滞后，使用有效 patch 配对；各 TTCN 特征分别按配对时间中心化，相关系数为：
+默认 `--lag-estimator fft`：对观测历史逐特征中心化、按变量联合 RMS 标准化，沿 patch 时间轴执行长度 L 的循环 FFT，汇总目标与源共轭频谱的逐特征乘积，按官方局部峰值规则在 1…L−2 选择 lag，再按绝对相关 top-K。单特征完整输入与官方标量估计器数值一致；多特征是共享 TTCN 表征上的扩展，不改 patch 表示。
 
-    rho = sum(time,feature)(X_centered * Y_centered)
-          / sqrt(sum(X_centered^2) * sum(Y_centered^2))
-
-max_lag/min_pairs 单位仍为 patch/有效 patch 对。候选按绝对相关取最优滞后，再阈值过滤、Top-K；滞后不反向传播。它是共享 TTCN 表征的预测相关，不再是原始 OP/PV 的 Pearson；不可直接当作物理因果效应。历史原始值完全不变的变量额外排除，避免仅时间编码产生有效 leader。
+默认不使用相关阈值、最少配对数或 max_lag 截断。缺失 patch 在归一化尺度填 0，空/常量等未定义通道排除。`--lag-estimator pearson` 保留原逐候选重新中心化的非循环实现，max_lag/min_pairs/min_correlation 仅对此模式生效。历史原始值完全不变的变量仍额外排除，避免仅时间编码产生 leader。lag 不反向传播，不能直接当作物理因果效应。
 
 按照 X[L+h-lag] 从历史或已知未来 X token 取完整特征向量。历史统计量用于标准化，负相关翻转标准化偏差方向。LIFT 的状态分类器读取完整历史特征；状态概率和相关特征生成 2K+1 组频域滤波器。对每个特征通道沿 patch 时间轴执行三路 FFT 滤波/差异/自身频谱混合，保留向量维；频率滤波器和复数混合层在特征通道间共享。单特征输入退化为 v2 的公式。
 
-prefix 模式为输出 h 仅使用对齐序列 n<=h 的前缀，逆 FFT 后取该输出的对角位置。无有效对齐前缀回退到基础 token。约束精度是 patch 级，未声称原始秒级精确滞后；global 模式不提供该前缀保证。
+默认 global 沿用官方全区间频率混合，leader 支路停止梯度，温度直接使用可学习参数；无效槽位显式屏蔽。prefix 仅作为可选时间约束：输出 h 使用 n<=h 的对齐前缀，逆 FFT 后取对角位置。无有效输入时回退到基础 token。global 不提供 prefix 的 patch 级时间边界保证。详细边界见 [LIFT 官方对齐说明](LIFT_OFFICIAL.md)。
 
 ## 解码、监督与评估
 

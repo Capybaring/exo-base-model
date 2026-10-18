@@ -67,12 +67,12 @@ def test_token_leads_recover_signed_delays_with_missing_and_no_future_fields():
     y[:, 1, 5:] = -3*x[:, 1, :-5]+7
     xm = torch.rand(2, 2, 96, generator=generator) > .15
     ym = torch.rand(2, 2, 96, generator=generator) > .15
-    leads = estimate_token_leads(y, x, ym, xm, 12, 24, .99, 1)
+    leads = estimate_token_leads(y, x, ym, xm, 12, 24, .99, 1, estimator="pearson")
     assert leads['lag'][:, 0, 0].tolist() == [3, 3]
     assert leads['lag'][:, 1, 1].tolist() == [5, 5]
     assert (leads['correlation'][:, 0, 0] > .999).all()
     assert (leads['correlation'][:, 1, 1] < -.999).all()
-    constant = estimate_token_leads(y, torch.ones_like(x), ym, xm, 12, 24, .3, 1)
+    constant = estimate_token_leads(y, torch.ones_like(x), ym, xm, 12, 24, .3, 1, estimator="pearson")
     assert not constant['valid'].any()
 
 
@@ -146,7 +146,9 @@ def test_vector_model_no_scalar_means_hidden_nan_or_future_y_leakage_and_finite_
 
 def test_end_to_end_prefix_prevents_future_control_effect_before_estimated_lag():
     torch.manual_seed(26)
-    model = build_model(config()).eval()
+    settings = config()
+    settings.lag_estimator, settings.refiner_mode = 'pearson', 'prefix'
+    model = build_model(settings).eval()
     batch = token_batch()
     estimates = model.estimate_lags(batch)
     assert estimates['leader_valid'].item()
@@ -201,7 +203,8 @@ def test_vector_refiner_time_axis_shapes_empty_fallback_and_gradients(mode, hori
     result = module(history, mask, base, aligned, available, estimates)
     assert result.shape == base.shape
     result.square().mean().backward()
-    assert torch.isfinite(base.grad).all() and torch.isfinite(aligned.grad).all()
+    assert torch.isfinite(base.grad).all()
+    assert aligned.grad is None  # official LIFT detaches the aligned leader stream
     torch.testing.assert_close(module(history, mask, base, aligned,
         torch.zeros_like(available), estimates), base)
 

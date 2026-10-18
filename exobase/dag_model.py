@@ -11,6 +11,7 @@ from torch import nn
 
 from .dag_layers.dag_model import DAGModel
 from .lags import estimate_leads, align_exogenous, ExogenousLeadRefiner
+from .lead_estimator import validate_lead_settings
 from .model import scalar_patch_means
 
 
@@ -38,14 +39,11 @@ class DAGExogenousForecast(nn.Module):
         if c.variant not in ('dag-history', 'dag', 'dag-lift'):
             raise ValueError('Unknown DAG variant')
         if min(c.target_dim, c.exog_dim, c.history_patches, c.future_patches,
-               c.n_layers, c.n_heads, c.d_model, c.max_lag, c.leader_num, c.state_num) < 1:
+               c.n_layers, c.n_heads, c.d_model, c.leader_num, c.state_num) < 1:
             raise ValueError('Model sizes and lag settings must be positive')
         if c.d_model < 4 or c.d_model % 2 or c.d_model % c.n_heads:
             raise ValueError('DAG requires even d_model >=4, divisible by n_heads')
-        if c.min_pairs < 3 or not 0 <= c.min_correlation <= 1:
-            raise ValueError('min_pairs >=3 and 0 <= min_correlation <=1 required')
-        if c.variant == 'dag-lift' and c.history_patches < c.min_pairs + 1:
-            raise ValueError('Positive lag estimation requires min_pairs+1 history bins')
+        validate_lead_settings(c)
         if not 0 <= c.alpha <= 1 or c.beta < 0 or not 0 <= c.dropout < 1:
             raise ValueError('Invalid DAG mixture, auxiliary weight or dropout')
         # Width-one DAG embedding does not regroup the real-time bins. The
@@ -85,7 +83,7 @@ class DAGExogenousForecast(nn.Module):
             raise ValueError('Observed history summaries must be finite')
         return estimate_leads(history[:, :c.target_dim], history[:, c.target_dim:],
             hm[:, :c.target_dim], hm[:, c.target_dim:], c.max_lag, c.min_pairs,
-            c.min_correlation, c.leader_num)
+            c.min_correlation, c.leader_num, estimator=c.lag_estimator)
 
     def base_prediction(self, history, hm, future, fm):
         c = self.config
@@ -109,7 +107,7 @@ class DAGExogenousForecast(nn.Module):
         if c.variant == 'dag-lift':
             leads = estimate_leads(history[:, :c.target_dim], history[:, c.target_dim:],
                 hm[:, :c.target_dim], hm[:, c.target_dim:], c.max_lag, c.min_pairs,
-                c.min_correlation, c.leader_num)
+                c.min_correlation, c.leader_num, estimator=c.lag_estimator)
             aligned, available = align_exogenous(history[:, c.target_dim:], future,
                 hm[:, c.target_dim:], fm, leads)
             base = self.refiner(history[:, :c.target_dim], hm[:, :c.target_dim],

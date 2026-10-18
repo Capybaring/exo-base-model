@@ -1,5 +1,7 @@
 **TTCN + DAG + LIFT 替换包（2026-10-18）**
 
+> LIFT 后续更新：patch 方法保持本文件版本不变；领先估计和修正现已默认改为官方 FFT/global。以下 prefix/Pearson 描述是 TTCN 更新时的历史状态，当前设置见 [LIFT 官方对齐说明](docs/LIFT_OFFICIAL.md)。
+
 适用：此前 exo-base-model-2fa42e0，以及已经安装统一评估补丁的版本。把 ZIP 解压到远程项目根目录，与 exobase、configs 同级，覆盖同名文件即可。不需要上传 GitHub，不需要重新生成数据或安装新的依赖。
 
 **文件**

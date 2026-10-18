@@ -1,14 +1,13 @@
 """History-only X->Y lead estimation and known-exogenous LIFT refinement.
 
-This is an explicit adaptation, not the original circular FFT lead estimator:
-Pearson correlations use only finite, observed, overlapping history pairs.
-LIFT's state-dependent filter factory and three frequency streams are retained.
-Prefix mode prevents later aligned controls from affecting earlier predictions.
+The default estimator follows the official circular FFT/local-peak algorithm.
+Noncircular Pearson and prefix refinement remain explicit ablation options.
 """
 import torch
 from torch import nn
 
 from .lift_layers import FilterFactory, ComplexLinear
+from .lead_estimator import estimate_fft_leads, correlation_features
 
 
 def masked_statistics(values, mask):
@@ -23,13 +22,17 @@ def masked_statistics(values, mask):
 
 @torch.no_grad()
 def estimate_leads(y, x, ym, xm, max_lag=48, min_pairs=8,
-                   min_correlation=.3, leader_num=3):
+                   min_correlation=.3, leader_num=3, estimator='fft'):
     """Inputs [B,Y,L]/[B,X,L]; positive ell means X[s-ell] predicts Y[s].
 
-    No wraparound, interpolation, future samples or future target masks enter
-    this estimator. An ineligible pair has lag=0, valid=False (not zero delay).
-    Returned leader indices always index X, never the concatenated [Y,X] set.
+    FFT uses the official full circular lag search; max_lag, min_pairs and
+    min_correlation apply only to the legacy noncircular Pearson ablation.
+    Returned leader indices index X, never the concatenated [Y,X] set.
     """
+    if estimator == 'fft':
+        return estimate_fft_leads(y[..., None], x[..., None], ym, xm, leader_num)
+    if estimator != 'pearson':
+        raise ValueError('lag_estimator must be fft or pearson')
     y = torch.where(ym, y, 0).detach()
     x = torch.where(xm, x, 0).detach()
     b, ny, length = y.shape
@@ -91,7 +94,7 @@ def align_exogenous(x, future_x, xm, future_mask, estimates):
 
 
 class ExogenousLeadRefiner(nn.Module):
-    def __init__(self, history, horizon, targets, leaders, states=8, mode='prefix'):
+    def __init__(self, history, horizon, targets, leaders, states=8, mode='global'):
         super().__init__()
         if mode not in ('prefix', 'global'):
             raise ValueError('refiner_mode must be prefix or global')
@@ -108,12 +111,13 @@ class ExogenousLeadRefiner(nn.Module):
         safe, mean, std = masked_statistics(y_history, y_mask)
         filled_history = torch.where(y_mask, safe, mean)
         baseline = (base - mean) / std
-        r = estimates['leader_correlation'].abs() * estimates['leader_valid']
-        temperature = self.temperature.abs().clamp_min(.05)
-        features = torch.cat([torch.ones_like(r[..., :1]), r], -1)
-        features = (features / temperature).softmax(-1)[..., 1:]
+        features = correlation_features(estimates, self.temperature)
         filters, _ = self.factory(filled_history, features)
         filters = filters.reshape(*base.shape[:2], 2 * self.k + 1, -1)
+        # Official shifted_leader_seq is evaluated under no_grad. Keep the
+        # leader stream detached even when it comes from a learned encoder.
+        usable = available & estimates['leader_valid'][..., None]
+        aligned = torch.where(usable, aligned.detach(), 0)
         if self.mode == 'prefix':
             prefix = torch.ones(self.horizon, self.horizon, device=base.device,
                                 dtype=torch.bool).tril()
@@ -123,13 +127,16 @@ class ExogenousLeadRefiner(nn.Module):
             filters = filters.unsqueeze(2)
             yf = torch.fft.rfft(baseline).unsqueeze(2)
             uf = torch.fft.rfft(controls)
-            active = (available.unsqueeze(2) & prefix[None, None, :, None, :]).any((-1, -2))
+            leader_active = (usable.unsqueeze(2) & prefix[None, None, :, None, :]).any(-1)
+            active = leader_active.any(-1)
         else:
             yf = torch.fft.rfft(baseline)
             uf = torch.fft.rfft(aligned)
-            active = available.any(-2)
+            leader_active = usable.any(-1)
+            active = usable.any(-2)
         filtered = uf * filters[..., :self.k, :]
         difference = (filtered - yf.unsqueeze(-2)) * filters[..., self.k:-1, :]
+        difference = difference * leader_active[..., None]
         own = (yf * filters[..., -1, :]).expand_as(filtered.sum(-2))
         mixed = torch.cat([filtered.sum(-2), difference.sum(-2), own], -1)
         delta = torch.fft.irfft(self.mix_layer(mixed), n=self.horizon)

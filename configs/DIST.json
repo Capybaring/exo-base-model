@@ -30,9 +30,8 @@
   "save_path": "results/DIST/dag-lift",
   "split": "chronological",
   "normalization": "train",
-  "max_lag": 60,
-  "min_pairs": 16,
   "leader_num": 3,
   "state_num": 8,
-  "refiner_mode": "prefix"
+  "refiner_mode": "global",
+  "lag_estimator": "fft"
 }

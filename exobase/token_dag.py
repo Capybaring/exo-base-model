@@ -2,7 +2,7 @@
 
 This is a vector adaptation of DAG, not unchanged scalar DAG. Temporal tokens
 preserve every TTCN feature. Covariate tokens encode whole feature sequences.
-Known future X reaches dag-lift outputs only through prefix-aligned LIFT.
+Known future X reaches dag-lift outputs only through aligned LIFT.
 """
 import torch
 from torch import nn
@@ -10,6 +10,7 @@ from torch.utils.checkpoint import checkpoint
 
 from .ttcn import TTCNPatchEncoder, QueryDecoder
 from .token_lift import token_statistics, estimate_token_leads, align_token_exogenous, TokenLeadRefiner
+from .lead_estimator import validate_lead_settings
 from .dag_layers.Embed import CompressAndProject, PositionalEmbedding
 from .dag_layers.SelfAttention_Family import FullAttention, AttentionLayer
 from .dag_layers.Transformer_EncDec import Encoder, EncoderLayer
@@ -64,12 +65,9 @@ class DAGTokenForecast(nn.Module):
                 or c.d_model % c.n_heads or c.te_dim < 2):
             raise ValueError('Invalid TTCN/DAG variant or embedding dimensions')
         if min(c.target_dim, c.exog_dim, c.history_patches, c.future_patches,
-               c.n_layers, c.max_lag, c.leader_num, c.state_num) < 1:
+               c.n_layers, c.leader_num, c.state_num) < 1:
             raise ValueError('Model dimensions must be positive')
-        if c.min_pairs < 3 or not 0 <= c.min_correlation <= 1:
-            raise ValueError('Invalid lead-estimation thresholds')
-        if c.variant == 'dag-lift' and c.history_patches < c.min_pairs+1:
-            raise ValueError('Positive lag estimation requires min_pairs+1 history bins')
+        validate_lead_settings(c)
         if not 0 <= c.alpha <= 1 or c.beta < 0 or not 0 <= c.dropout < 1:
             raise ValueError('Invalid mixture, auxiliary weight or dropout')
         d, p, length, horizon = c.d_model, c.d_model-1, c.history_patches, c.future_patches
@@ -114,7 +112,7 @@ class DAGTokenForecast(nn.Module):
         mask = mask & (variation > 1e-10)[..., None]
         return estimate_token_leads(history[:, :c.target_dim], history[:, c.target_dim:],
             mask[:, :c.target_dim], mask[:, c.target_dim:], c.max_lag, c.min_pairs,
-            c.min_correlation, c.leader_num)
+            c.min_correlation, c.leader_num, estimator=c.lag_estimator)
 
     def estimate_lags(self, batch):
         history, mask = self.encode_history(batch)

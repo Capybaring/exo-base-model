@@ -35,7 +35,7 @@ def synthetic_batch(length=64, horizon=16):
 def small_config(variant='dag-lift', length=64, horizon=16):
     return ModelConfig(1, 1, length, variant=variant, future_patches=horizon,
         d_model=8, n_heads=2, n_layers=1, dropout=0, max_lag=8, min_pairs=32,
-        min_correlation=.8, leader_num=1, state_num=2)
+        min_correlation=.8, leader_num=1, state_num=2, lag_estimator="pearson", refiner_mode="prefix")
 
 
 def test_recovers_pair_specific_positive_negative_delays_with_missing_values():
@@ -47,7 +47,7 @@ def test_recovers_pair_specific_positive_negative_delays_with_missing_values():
     xm = torch.rand(x.shape, generator=generator) > .15
     ym = torch.rand(y.shape, generator=generator) > .15
     leads = estimate_leads(y.masked_fill(~ym, float('nan')),
-        x.masked_fill(~xm, float('nan')), ym, xm, 12, 32, .9, 1)
+        x.masked_fill(~xm, float('nan')), ym, xm, 12, 32, .9, 1, estimator="pearson")
     assert leads['lag'][:, 0, 0].tolist() == [3, 3]
     assert leads['lag'][:, 1, 1].tolist() == [5, 5]
     assert (leads['correlation'][:, 0, 0] > .999).all()
@@ -61,9 +61,9 @@ def test_reverse_direction_and_constant_series_are_not_valid_leaders():
     y = torch.randn(1, 1, 128, generator=generator)
     x = torch.cat([torch.randn(1, 1, 4, generator=generator), y[..., :-4]], -1)
     mask = torch.ones_like(y, dtype=torch.bool)
-    leads = estimate_leads(y, x, mask, mask, 12, 60, .9, 1)
+    leads = estimate_leads(y, x, mask, mask, 12, 60, .9, 1, estimator="pearson")
     assert not leads['valid'].any()  # X follows Y; it does not lead it
-    constant = estimate_leads(y, torch.ones_like(x), mask, mask, 12, 60, .3, 1)
+    constant = estimate_leads(y, torch.ones_like(x), mask, mask, 12, 60, .3, 1, estimator="pearson")
     assert not constant['valid'].any() and not constant['lag'].any()
 
 
@@ -73,7 +73,7 @@ def test_no_circular_wrap_and_gaps_are_not_compressed():
     mask = torch.ones_like(x, dtype=torch.bool)
     # A circular estimator can return +62 from wrapping. There are only two
     # overlapping observations at that shift, so it is ineligible here.
-    result = estimate_leads(y, x, mask, mask, 63, 40, .99, 1)
+    result = estimate_leads(y, x, mask, mask, 63, 40, .99, 1, estimator="pearson")
     assert not result['valid'].any()
     batch = synthetic_batch()
     model = build_model(small_config()).eval()
@@ -251,6 +251,10 @@ def test_checkpoint_reload_prediction_and_lag_export(tmp_path):
     assert manifest['architecture_version'] == 3 and not manifest['lag_protocol']['future_x_bypass']
     assert manifest['model_config']['patch_encoder'] == 'ttcn'
     assert manifest['args']['normalization'] == 'train'
+    assert manifest['model_config']['lag_estimator'] == 'fft'
+    assert manifest['model_config']['refiner_mode'] == 'global'
+    assert manifest['lag_protocol']['min_pairs'] is None
+    assert manifest['lag_protocol']['min_correlation'] is None
     assert (output/'test_lags.csv').exists()
     csv = tmp_path/'predictions.csv'
     lags = tmp_path/'lags.csv'

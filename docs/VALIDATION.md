@@ -1,5 +1,9 @@
 # 验证记录
 
+2026-10-18 LIFT 官方对齐：全套 `python -m pytest -q` 共 77 项通过。新增 17 项检查覆盖固定官方代码的奇偶长度 FFT 相关/lag/Top-K 数值对照、一般向量直接循环点积参考、共享多特征历史的逐特征官方 refiner 对照（单/多状态及正/负/小温度）、无效/完全缺失 leader 的差分屏蔽、默认配置与旧 checkpoint 算法恢复。TTCN 编码器、data.py、FilterFactory/ComplexLinear 与 upstream 参照逐字节不变；token_dag 的 patch 编码、基础预测、辅助监督和查询解码方法未改。已有训练/导出/重载测试也覆盖新默认 fft/global。尚未重训正式数据集，不能据此声称精度提升。详情见 [LIFT 官方对齐说明](LIFT_OFFICIAL.md)。
+
+以下 TTCN 发布记录及 v2 记录描述各自当时的 Pearson/prefix 行为，当前默认已更新为 fft/global。
+
 2026-10-18：新增 TTCN 向量 DAG/LIFT 架构 v3。非空 TTCN 与官方原函数数值对照；同均值不同观测分布/时间可产生不同 token；padding、全空、隐藏 NaN 安全；向量相关恢复合成正/负滞后；单特征频域修正与 v2 两种模式对照；整条预测路径验证未来控制的 prefix 时间边界及未来 Y 不参与前向；新旧 checkpoint 重载和实际查询时间解码。实际 DIST 小规模验证使用 1 小时 patch、24→24、d_model=64；这些是管线验证，不是正式精度结果。详细迁移边界见 [TTCN v3](TTCN_V3.md)。
 
 以下为架构 v2 的历史验证记录（2026-10-17）：

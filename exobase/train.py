@@ -48,12 +48,14 @@ def parser():
     p.add_argument('--alpha', type=float, default=.5, help='DAG temporal/covariate mixture')
     p.add_argument('--beta', type=float, default=.1, help='DAG masked auxiliary loss weight')
     p.add_argument('--dropout', type=float, default=.1)
-    p.add_argument('--max-lag', type=int, default=48, help='Maximum positive X->Y lag in patch bins')
-    p.add_argument('--min-pairs', type=int, default=8, help='Minimum observed history pairs per candidate lag')
-    p.add_argument('--min-correlation', type=float, default=.3)
+    p.add_argument('--lag-estimator', choices=['fft', 'pearson'], default='fft',
+        help='Official circular FFT/local peaks (default), or legacy masked noncircular Pearson')
+    p.add_argument('--max-lag', type=int, default=48, help='Pearson only: maximum positive lag in patch bins')
+    p.add_argument('--min-pairs', type=int, default=8, help='Pearson only: minimum observed pairs per lag')
+    p.add_argument('--min-correlation', type=float, default=.3, help='Pearson only: minimum absolute correlation')
     p.add_argument('--leader-num', type=int, default=3)
     p.add_argument('--state-num', type=int, default=8)
-    p.add_argument('--refiner-mode', choices=['prefix', 'global'], default='prefix',
+    p.add_argument('--refiner-mode', choices=['prefix', 'global'], default='global',
         help='prefix bounds control availability per prediction bin; global uses horizon-wide mixing')
     p.add_argument('--delay-context', type=int, default=4)
     p.add_argument('--n-patterns', type=int, default=16)
@@ -91,8 +93,12 @@ def main(argv=None):
             or not all(math.isclose(d/args.patch_seconds, round(d/args.patch_seconds))
                        for d in (args.history, args.forecast))):
         p.error('DAG/LIFT requires nonoverlapping patches and history/forecast aligned to the patch grid')
-    if args.variant == 'dag-lift' and round(args.history/args.patch_seconds) < args.min_pairs + 1:
+    if (args.variant == 'dag-lift' and args.lag_estimator == 'pearson'
+            and round(args.history/args.patch_seconds) < args.min_pairs + 1):
         p.error('History must contain at least min-pairs+1 patch bins for a positive lag')
+    if (args.variant == 'dag-lift' and args.lag_estimator == 'fft'
+            and round(args.history/args.patch_seconds) < 3):
+        p.error('Official FFT local peaks require at least 3 history patch bins')
     if args.variant == 'delay' and (args.patch_stride != args.patch_seconds
             or not math.isclose(args.history/args.patch_seconds, round(args.history/args.patch_seconds))):
         p.error('Patch-level DFT baseline requires nonoverlapping patches and an aligned history boundary')
@@ -132,7 +138,8 @@ def main(argv=None):
         future_patches=math.ceil(args.forecast/args.patch_seconds), alpha=args.alpha,
         beta=args.beta, dropout=args.dropout, max_lag=args.max_lag, min_pairs=args.min_pairs,
         min_correlation=args.min_correlation, leader_num=args.leader_num,
-        state_num=args.state_num, refiner_mode=args.refiner_mode, patch_encoder=args.patch_encoder)
+        state_num=args.state_num, refiner_mode=args.refiner_mode, patch_encoder=args.patch_encoder,
+        lag_estimator=args.lag_estimator)
     patterns, pattern_info = None, None
     if args.variant == 'delay':
         from .patterns import fit_pattern_bank
@@ -163,9 +170,17 @@ def main(argv=None):
             'auxiliary_targets': 'raw observed future X and historical Y, not learned token labels'}
             if args.variant.startswith('dag') and args.patch_encoder == 'ttcn' else None),
         'lag_protocol': ({'direction': 'X->Y only',
-            'estimator': ('history-only masked noncircular feature-centered TTCN-token Pearson'
-                          if args.patch_encoder == 'ttcn' else 'history-only masked noncircular Pearson'),
-            'positive_lags_only': True, 'max_lag_seconds': args.max_lag*args.patch_seconds,
+            'estimator': ('official circular FFT/local peaks on history, shared-feature spectral mean'
+                          if args.lag_estimator == 'fft' else 'history-only masked noncircular Pearson'),
+            'feature_space': 'TTCN tokens' if args.patch_encoder == 'ttcn' else 'scalar patch means',
+            'lag_estimator': args.lag_estimator,
+            'positive_lags_only': True,
+            'max_lag_seconds': ((config.history_patches-2) if args.lag_estimator == 'fft'
+                                else min(args.max_lag, config.history_patches-1))*args.patch_seconds,
+            'min_pairs': args.min_pairs if args.lag_estimator == 'pearson' else None,
+            'min_correlation': args.min_correlation if args.lag_estimator == 'pearson' else None,
+            'pair_count': 'circular observed pairs' if args.lag_estimator == 'fft' else 'noncircular observed pairs',
+            'leader_stream_detached': True,
             'refiner_mode': args.refiner_mode, 'future_x_bypass': False,
             'learned_lag_estimator': False} if args.variant == 'dag-lift' else None),
         'smoke_test': args.max_records is not None,

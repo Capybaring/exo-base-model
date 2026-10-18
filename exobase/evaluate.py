@@ -63,7 +63,7 @@ def main(argv=None):
     loader = DataLoader(Subset(records, manifest['record_indices'][args.split]),
         batch_size=args.batch_size or settings.batch_size, shuffle=False,
         collate_fn=make_collator(settings, manifest['normalization']))
-    config = ModelConfig(**manifest['model_config'])
+    config = ModelConfig.from_saved(manifest['model_config'])
     model = build_model(config, saved['state_dict'].get('memory.patterns')).to(args.device)
     model.load_state_dict(saved['state_dict'])
     metrics = evaluate_irregular(model, loader, args.device, manifest['normalization'],

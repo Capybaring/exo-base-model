@@ -1,13 +1,14 @@
-"""Directed, noncircular LIFT adaptation for full TTCN feature sequences.
+"""Directed LIFT adaptation for full TTCN feature sequences.
 
 Time is always the patch axis. Features are never flattened into fake time or
-averaged into a scalar. Lead scores are history-only feature-centered Pearson
-correlations in the shared TTCN basis, not correlations of raw physical means.
+averaged into a scalar. Default lead scores use official circular FFT/local
+peaks in the shared TTCN basis; noncircular Pearson is an optional ablation.
 """
 import torch
 from torch import nn
 
 from .lift_layers import FilterFactory, ComplexLinear
+from .lead_estimator import estimate_fft_leads, correlation_features
 
 
 def token_statistics(values, mask):
@@ -23,10 +24,15 @@ def token_statistics(values, mask):
 
 
 @torch.no_grad()
-def estimate_token_leads(y, x, ym, xm, max_lag, min_pairs, min_correlation, leader_num):
+def estimate_token_leads(y, x, ym, xm, max_lag, min_pairs, min_correlation, leader_num,
+                         estimator='fft'):
     """[B,Y,L,P]/[B,X,L,P], excluding the TTCN validity feature."""
     if y.shape[-2:] != x.shape[-2:]:
         raise ValueError('Lead inputs must share patch grid and TTCN feature basis')
+    if estimator == 'fft':
+        return estimate_fft_leads(y, x, ym, xm, leader_num)
+    if estimator != 'pearson':
+        raise ValueError('lag_estimator must be fft or pearson')
     y, x = torch.where(ym[..., None], y, 0), torch.where(xm[..., None], x, 0)
     b, ny, length, _ = y.shape
     nx = x.shape[1]
@@ -101,25 +107,28 @@ class TokenLeadRefiner(nn.Module):
         safe, mean, std = token_statistics(history, mask)
         filled = torch.where(mask[..., None], safe, mean)
         normalized = (base-mean)/std
-        r = estimates['leader_correlation'].abs()*estimates['leader_valid']
-        feature = torch.cat([torch.ones_like(r[..., :1]), r], -1)
-        feature = (feature/self.temperature.abs().clamp_min(.05)).softmax(-1)[..., 1:]
+        feature = correlation_features(estimates, self.temperature)
         filters, _ = self.factory(filled.flatten(-2), feature)
         filters = filters.reshape(*base.shape[:2], 2*self.k+1, -1)
+        usable = available & estimates['leader_valid'][..., None]
+        aligned = torch.where(usable[..., None], aligned.detach(), 0)
         if self.mode == 'prefix':
             prefix = torch.ones(self.horizon, self.horizon, dtype=torch.bool,
                                 device=base.device).tril()
             controls = aligned.unsqueeze(2)*prefix[None, None, :, None, :, None]
             filters = filters.unsqueeze(2)
             yf = torch.fft.rfft(normalized, dim=-2).unsqueeze(2)
-            active = (available.unsqueeze(2) & prefix[None, None, :, None, :]).any((-1, -2))
+            leader_active = (usable.unsqueeze(2) & prefix[None, None, :, None, :]).any(-1)
+            active = leader_active.any(-1)
         else:
             controls = aligned
             yf = torch.fft.rfft(normalized, dim=-2)
-            active = available.any(-2)
+            leader_active = usable.any(-1)
+            active = usable.any(-2)
         uf = torch.fft.rfft(controls, dim=-2)
         filtered = uf*filters[..., :self.k, :, None]
         difference = (filtered-yf.unsqueeze(-3))*filters[..., self.k:-1, :, None]
+        difference = difference*leader_active[..., None, None]
         own = (yf*filters[..., -1, :, None]).expand_as(filtered.sum(-3))
         streams = torch.cat([filtered.sum(-3), difference.sum(-3), own], -2)
         spectrum = self.mix_layer(streams.transpose(-1, -2)).transpose(-1, -2)

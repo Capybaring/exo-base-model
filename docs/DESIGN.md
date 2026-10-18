@@ -49,22 +49,11 @@ DAG 输入空单元用该变量该记录历史有效块均值填充，全空历�
 
 ## 3. X→Y 领先估计
 
-代码：exobase/lags.py::estimate_leads。每条记录、每个 Y_j/X_i、每个正时延 ℓ，仅使用同时有效的历史配对：
+默认使用 `exobase/lead_estimator.py`，与固定官方 efficient/local_max 版本一致的循环 FFT 互相关、局部峰值与绝对相关 Top-K。目标/来源限定为 Y/X，搜索 lag 为 1…L−2，不使用额外 max_lag、min_pairs 或 min_correlation 筛选。完整标量输入与官方数值一致。
 
-\[
-\Omega_{ji}(\ell)=\{s:s<L,\ s-\ell\ge0,\ M^Y_{j,s}M^X_{i,s-\ell}=1\},
-\]
+现有 TTCN 向量接口保留：逐特征按观测历史中心化，使用单变量联合 RMS，逐特征目标频谱×来源共轭频谱取均值，再 inverse FFT/L。缺失 patch 以归一化 0 表示；空/常量和完全无有效配对的未定义关系排除。配对数按循环位置计数，不对相关重新加权。它是共享 TTCN 表征上的扩展，不能解释成物理因果边。
 
-\[
-\rho_{ji}(\ell)=\operatorname{Pearson}_{s\in\Omega_{ji}(\ell)}(Y_{j,s},X_{i,s-\ell}),\qquad
-\widehat\delta_{ji}=\arg\max_{1\le\ell\le L_{max}}|\rho_{ji}(\ell)|.
-\]
-
-要求有效配对数≥min_pairs、两侧非恒定；最大绝对相关低于 min_correlation 则拒绝该变量对。每个目标只在有效 X 中取 top-K，没有有效来源则不修正。相关相同优先较短滞后。
-
-与 LIFT 官方估计器不同：采用非循环、有限重叠、逐候选重新中心化的 mask-aware Pearson。不绕回边界、不跨空缺拼接、不以填充值估计，不使用原代码的局部峰值筛选，也不使用额外记录历史。默认假设领先关系在当前记录预测区间近似稳定。
-
-estimate_lags 只需 observed_data/observed_mask，不需要任何未来字段。估计器无学习参数，不对 argmax 反向传播。相关峰值不等于已识别的纯延迟、响应起始时间或物理因果边。
+原非循环、逐 lag 重中心化的 mask-aware Pearson 通过 `--lag-estimator pearson` 显式选择，此时 max_lag/min_pairs/min_correlation 生效。估计器始终无参数，未来值不进入 lag 估计。详见 [LIFT 官方对齐](LIFT_OFFICIAL.md)。
 
 ## 4. 已知未来 X 对齐
 
@@ -78,7 +67,7 @@ Z_{ji,h}=\operatorname{sign}(\rho_{ji})\widetilde X_{i,L+h-\widehat\delta_{ji}}.
 
 例如 δ=3 时，未来 X 第 5 块改变，最早影响未来 Y 第 8 块（从 0 计数）。该时间边界通过自动测试。
 
-## 5. LIFT 频域修正及 prefix 适配
+## 5. 官方 global 频域修正及可选 prefix
 
 保留官方 FilterFactory/ComplexLinear。状态概率来自 Y 历史和目标状态参数；相关强度驱动 2K+1 组状态相关滤波器。三路信号沿用官方实现：
 
@@ -93,9 +82,9 @@ V=\mathcal F(\widehat Y_j^{base})\odot r_V,
 +\mathcal F^{-1}(W_{complex}[\sum_kU_k,\sum_kD_k,V]+b).
 \]
 
-在 Y 历史归一化尺度计算，再将残差变回 Y 尺度。基础预测和修正共同训练，温度下界 0.05，防止除零。
+在 Y 历史归一化尺度计算，再将残差变回 Y 尺度。基础预测和修正共同训练，温度按官方直接使用可学习参数；对齐 leader 支路停止梯度。无效/完全不可用槽位从相关特征和差分聚合中排除。
 
-全预测区间频域混合会让晚时刻控制影响较早输出；默认 prefix 模式对每个 h 独立构造：
+默认 global 对完整预测区间频域混合，可能让晚时刻已知控制影响较早输出。可选 prefix 模式对每个 h 独立构造：
 
 \[
 Z^{(h)}_{ji,u}=Z_{ji,u}\mathbf1[u\le h].
@@ -103,7 +92,7 @@ Z^{(h)}_{ji,u}=Z_{ji,u}\mathbf1[u\le h].
 
 用相同滤波器及完整基础预测运行修正，仅取第 h 个输出。基础预测和滤波器仅依赖历史，因此该输出不依赖 X_i 在 L+h-δ_ji 之后的实际未来数值。过去控制对多个后续时刻的持续影响仍可学习；前缀无可用领先输入时残差为 0。
 
-这是本场景的额外时间约束，不是未经修改的原始 LIFT。global 模式省略 prefix，供对照，不作逐输出时间边界保证。prefix 的控制中间量约为 O(B·Y·K·H²)，长预测区间需注意计算规模。
+prefix 是本场景的额外时间约束，不是原始 LIFT。默认 global 模式省略 prefix，不作逐输出时间边界保证。prefix 的控制中间量约为 O(B·Y·K·H²)，长预测区间需注意计算规模。
 
 ## 6. 查询与解释边界
 
