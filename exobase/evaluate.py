@@ -1,7 +1,7 @@
 """Re-evaluate a saved checkpoint with the unified masked DAG-scale metrics.
 
 No optimization, normalization change, or checkpoint modification is performed.
-Works with architecture-v2 checkpoints saved before evaluation_protocol existed.
+Works with architecture-v2/v3 checkpoints, including old evaluation metadata.
 """
 import argparse
 import json

@@ -37,6 +37,9 @@ class ModelConfig:
     leader_num: int = 3
     state_num: int = 8
     refiner_mode: str = 'prefix'
+    # Missing from v2 checkpoint configs: retain their scalar-mean architecture.
+    # New training explicitly selects ttcn in train.py.
+    patch_encoder: str = 'mean'
 
 
 class TPatchBackbone(tPatchGNN):
@@ -206,6 +209,11 @@ def build_model(config, patterns=None):
     if isinstance(config, dict):
         config = ModelConfig(**config)
     if config.variant in ('dag-history', 'dag', 'dag-lift'):
+        if config.patch_encoder == 'ttcn':
+            from .token_dag import DAGTokenForecast
+            return DAGTokenForecast(config)
+        if config.patch_encoder != 'mean':
+            raise ValueError('Unknown patch encoder')
         from .dag_model import DAGExogenousForecast
         return DAGExogenousForecast(config)
     return ExogenousTPatchGNN(config, patterns)

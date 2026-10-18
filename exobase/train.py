@@ -30,6 +30,8 @@ def parser():
     p.add_argument('--patch-seconds', type=float, default=60)
     p.add_argument('--patch-stride', type=float, default=None, help='Seconds; defaults to patch width')
     p.add_argument('--variant', choices=['dag-history', 'dag', 'dag-lift', 'tpatch-y', 'tpatch', 'exo', 'delay'], default='dag-lift')
+    p.add_argument('--patch-encoder', choices=['ttcn', 'mean'], default='ttcn',
+        help='DAG input: full point/time TTCN tokens (default); mean is the explicit v2 baseline')
     p.add_argument('--split', choices=['official-random', 'chronological'], default='chronological')
     p.add_argument('--normalization', choices=['seen', 'train'], default='train')
     p.add_argument('--batch-size', type=int, default=2)
@@ -130,7 +132,7 @@ def main(argv=None):
         future_patches=math.ceil(args.forecast/args.patch_seconds), alpha=args.alpha,
         beta=args.beta, dropout=args.dropout, max_lag=args.max_lag, min_pairs=args.min_pairs,
         min_correlation=args.min_correlation, leader_num=args.leader_num,
-        state_num=args.state_num, refiner_mode=args.refiner_mode)
+        state_num=args.state_num, refiner_mode=args.refiner_mode, patch_encoder=args.patch_encoder)
     patterns, pattern_info = None, None
     if args.variant == 'delay':
         from .patterns import fit_pattern_bank
@@ -150,9 +152,19 @@ def main(argv=None):
         'incomplete_tail_seconds': float(table.time[-1] % records.duration),
         'normalization_scope': 'train+validation (official seen_data)' if args.normalization == 'seen' else 'train only',
         'known_future_x': args.variant in ('dag', 'dag-lift', 'exo', 'delay'), 'pattern_bank': pattern_info,
-        'architecture_version': 2,
-        'backbone': 'DAG dual attention on masked patch means' if args.variant.startswith('dag') else 'legacy t-PatchGNN',
-        'lag_protocol': ({'direction': 'X->Y only', 'estimator': 'history-only masked noncircular Pearson',
+        'architecture_version': 3 if args.variant.startswith('dag') and args.patch_encoder == 'ttcn' else 2,
+        'backbone': (('DAG dual attention on full TTCN tokens' if args.patch_encoder == 'ttcn'
+                      else 'DAG dual attention on masked patch means')
+                     if args.variant.startswith('dag') else 'legacy t-PatchGNN'),
+        'patch_protocol': ({'encoder': 'official t-PatchGNN point/time TTCN, safe empty patches',
+            'features': args.d_model, 'scalar_mean_before_backbone': False,
+            'future_x_encoder': 'shared with history, per patch only',
+            'decoder': 'forecast token + actual query-time embedding',
+            'auxiliary_targets': 'raw observed future X and historical Y, not learned token labels'}
+            if args.variant.startswith('dag') and args.patch_encoder == 'ttcn' else None),
+        'lag_protocol': ({'direction': 'X->Y only',
+            'estimator': ('history-only masked noncircular feature-centered TTCN-token Pearson'
+                          if args.patch_encoder == 'ttcn' else 'history-only masked noncircular Pearson'),
             'positive_lags_only': True, 'max_lag_seconds': args.max_lag*args.patch_seconds,
             'refiner_mode': args.refiner_mode, 'future_x_bypass': False,
             'learned_lag_estimator': False} if args.variant == 'dag-lift' else None),

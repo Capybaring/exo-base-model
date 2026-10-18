@@ -248,7 +248,8 @@ def test_checkpoint_reload_prediction_and_lag_export(tmp_path):
         '--state-num', '2', '--dropout', '0', '--threads', '1',
         '--device', 'cpu', '--save-path', str(output)])
     manifest = json.loads((output/'manifest.json').read_text())
-    assert manifest['architecture_version'] == 2 and not manifest['lag_protocol']['future_x_bypass']
+    assert manifest['architecture_version'] == 3 and not manifest['lag_protocol']['future_x_bypass']
+    assert manifest['model_config']['patch_encoder'] == 'ttcn'
     assert manifest['args']['normalization'] == 'train'
     assert (output/'test_lags.csv').exists()
     csv = tmp_path/'predictions.csv'
