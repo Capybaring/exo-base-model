@@ -22,7 +22,7 @@ def main(argv=None):
     p.add_argument('--device', default='cpu')
     p.add_argument('--threads', type=int, default=2)
     p.add_argument('--output', required=True)
-    p.add_argument('--lag-output', help='Optional history-only X->Y lag diagnostic CSV (dag-lift only)')
+    p.add_argument('--lag-output', help='Optional history-only X->Y lag CSV (patch-lift/dag-lift)')
     p.add_argument('--overwrite', action='store_true')
     args = p.parse_args(argv)
     if args.threads < 1:
@@ -51,8 +51,8 @@ def main(argv=None):
         collate_fn=make_collator(settings, manifest['normalization']))
     config = ModelConfig.from_saved(manifest['model_config'])
     patterns = saved['state_dict'].get('memory.patterns')
-    if args.lag_output and config.variant != 'dag-lift':
-        p.error('--lag-output requires a dag-lift checkpoint')
+    if args.lag_output and config.variant not in ('dag-lift', 'patch-lift'):
+        p.error('--lag-output requires a patch-lift or dag-lift checkpoint')
     model = build_model(config, patterns).to(args.device)
     model.load_state_dict(saved['state_dict']); model.eval()
     n = config.target_dim

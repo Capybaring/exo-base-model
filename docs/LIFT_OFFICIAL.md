@@ -1,4 +1,6 @@
-# LIFT 默认实现与官方版本对齐（2026-10-18）
+# LIFT v3 实现与官方版本对齐（2026-10-18）
+
+本文描述保留的 dag-lift。当前默认 patch-lift 使用 [v4 的标量 lag 诊断、独立编码器和可训练 leader 支路](Y_BASE_V4.md)；频域核心复用本文实现，适配边界不同。
 
 本次从 master 的 TTCN 更新 `c2ea365` 开始，仅调整 LIFT。`exobase/ttcn.py`、`exobase/data.py`、TTCN 特征维度、patch 编码与查询时间解码保持不变。
 

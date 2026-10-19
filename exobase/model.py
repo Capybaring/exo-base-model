@@ -1,7 +1,7 @@
 """Shared config/factory and the explicitly retained legacy t-PatchGNN models.
 
-New default training routes to dag_model.py. Legacy classes below preserve
-old checkpoints and comparisons; their graphs are NOT used by DAG variants.
+New default training routes to y_forecast.py. DAG and legacy classes preserve
+old checkpoints and comparisons; their graphs are NOT used by v4 variants.
 """
 import math
 from dataclasses import dataclass
@@ -214,9 +214,12 @@ class ExogenousTPatchGNN(nn.Module):
 
 
 def build_model(config, patterns=None):
-    """Route modern DAG/LIFT models and explicitly retained legacy baselines."""
+    """Route Y/patch/LIFT models, retained DAG, and legacy baselines."""
     if isinstance(config, dict):
         config = ModelConfig(**config)
+    if config.variant in ('y-base', 'patch-base', 'patch-lift'):
+        from .y_forecast import YForecast
+        return YForecast(config)
     if config.variant in ('dag-history', 'dag', 'dag-lift'):
         if config.patch_encoder == 'ttcn':
             from .token_dag import DAGTokenForecast

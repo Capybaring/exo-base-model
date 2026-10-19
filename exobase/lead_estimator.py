@@ -13,7 +13,7 @@ import torch
 def validate_lead_settings(config):
     if config.lag_estimator not in ('fft', 'pearson'):
         raise ValueError('lag_estimator must be fft or pearson')
-    if config.variant != 'dag-lift':
+    if config.variant not in ('dag-lift', 'patch-lift'):
         return
     if config.lag_estimator == 'fft':
         if config.history_patches < 3:

@@ -4,7 +4,7 @@
 Examples (from the repository root):
   python -u scripts/run_all.py --device cuda:0
   python -u scripts/run_all.py --device cuda:0 --no-lift
-  python -u scripts/run_all.py --device cuda:0 --variants dag-lift dag-history
+  python -u scripts/run_all.py --device cuda:0 --variants y-base patch-base patch-lift
 
 Default: 24 -> 24 native steps; DIST uses one-hour patches. No model, patch
 encoder, source data, or preset file is modified by this runner.
@@ -25,7 +25,8 @@ sys.path.insert(0, str(ROOT))
 STEPS = {'DIST': 3600, 'NP': 3600, 'PJM': 3600, 'BE': 3600, 'FR': 3600,
          'DE': 3600, 'Energy': 3600, 'Sdwpfm1': 1800, 'Sdwpfm2': 1800,
          'Sdwpfh1': 3600, 'Sdwpfh2': 3600, 'Colbun': 86400, 'Rapel': 86400}
-VARIANTS = ('dag-lift', 'dag-history', 'dag')
+VARIANTS = ('y-base', 'patch-base', 'patch-lift', 'dag-lift', 'dag-history', 'dag')
+SIMPLE = ('y-base', 'patch-base', 'patch-lift')
 OVERRIDES = ('epochs', 'patience', 'batch_size', 'd_model', 'n_heads', 'n_layers',
              'state_num', 'lr', 'alpha', 'beta')
 
@@ -37,8 +38,8 @@ def parser():
                    help='all = DIST + 12 Table-3 datasets; table3 excludes DIST')
     p.add_argument('--datasets', nargs='+', choices=list(STEPS), help='Run only these datasets')
     p.add_argument('--variants', nargs='+', choices=VARIANTS,
-                   help='Default dag-lift; dag-history removes only LIFT; dag directly uses future X')
-    p.add_argument('--no-lift', action='store_true', help='Alias for --variants dag-history')
+                   help='Default patch-lift; y-base/patch-base are component baselines; DAG variants retained')
+    p.add_argument('--no-lift', action='store_true', help='Default patch-base; explicit dag-lift -> dag-history')
     p.add_argument('--device', default='cuda' if _cuda_available() else 'cpu')
     p.add_argument('--data-dir', type=Path, help='Optional flat directory containing DATASET.npz')
     p.add_argument('--output-dir', type=Path, help='New output directory; default is unique')
@@ -68,11 +69,13 @@ def resolve(root, path):
 
 def selections(args):
     datasets = args.datasets or [name for name in STEPS if args.suite == 'all' or name != 'DIST']
-    variants = args.variants or ['dag-lift']
+    variants = args.variants or ['patch-lift']
     if args.no_lift:
-        if args.variants and args.variants != ['dag-history']:
+        without = {'patch-lift': 'patch-base', 'patch-base': 'patch-base',
+                   'dag-lift': 'dag-history', 'dag-history': 'dag-history'}
+        if len(variants) != 1 or variants[0] not in without:
             raise ValueError('--no-lift cannot be combined with other --variants')
-        variants = ['dag-history']
+        variants = [without[variants[0]]]
     if len(datasets) != len(set(datasets)) or len(variants) != len(set(variants)):
         raise ValueError('Duplicate datasets/variants would overwrite a job; remove duplicates')
     return datasets, variants
@@ -134,7 +137,7 @@ def build_jobs(root, args, plans, variants, output):
         for variant in variants:
             command = [sys.executable, '-u', '-m', 'exobase.train',
                 '--config', plan['config'], '--data-path', plan['data_path'],
-                '--variant', variant, '--patch-encoder', args.patch_encoder,
+                '--variant', variant, '--patch-encoder', 'mean' if variant == 'y-base' else args.patch_encoder,
                 '--lag-estimator', args.lag_estimator, '--refiner-mode', args.refiner_mode,
                 '--split', 'chronological', '--normalization', 'train',
                 '--history', str(plan['history_seconds']), '--forecast', str(plan['forecast_seconds']),
@@ -180,12 +183,13 @@ def result_row(plan, job, args, output):
     settings = manifest['args']
     expected = {'variant': job['variant'], 'history': plan['history_seconds'],
                 'forecast': plan['forecast_seconds'], 'patch_seconds': plan['step_seconds'],
-                'patch_stride': plan['step_seconds'], 'patch_encoder': args.patch_encoder,
+                'patch_stride': plan['step_seconds'],
+                'patch_encoder': 'mean' if job['variant'] == 'y-base' else args.patch_encoder,
                 'seed': args.seed, 'split': 'chronological', 'normalization': 'train',
                 'lag_estimator': args.lag_estimator, 'refiner_mode': args.refiner_mode}
     for key in OVERRIDES:
         if getattr(args, key) is not None:
-            expected[key] = getattr(args, key)
+            expected[key] = 0. if key == 'beta' and job['variant'] in SIMPLE else getattr(args, key)
     if any(settings.get(key) != value for key, value in expected.items()):
         raise ValueError('Saved configuration differs from the planned comparison')
     if manifest['data_sha256'] != plan['data_sha256'] or manifest['record_ids'] != plan['record_ids']:
@@ -201,20 +205,36 @@ def result_row(plan, job, args, output):
 
 
 def write_comparison(output, rows):
-    fields = ['dataset', 'with_lift_mse', 'without_lift_mse', 'mse_delta_with_minus_without',
+    fields = ['dataset', 'with_lift_variant', 'without_lift_variant',
+              'with_lift_mse', 'without_lift_mse', 'mse_delta_with_minus_without',
               'with_lift_mae', 'without_lift_mae', 'mae_delta_with_minus_without']
     with (output/'ablation_comparison.csv').open('w', newline='') as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         for name in dict.fromkeys(row['dataset'] for row in rows):
             pair = {row['variant']: row for row in rows if row['dataset'] == name and row['status'] == 'ok'}
-            if not {'dag-lift', 'dag-history'} <= pair.keys():
-                continue
-            full, base = pair['dag-lift'], pair['dag-history']
-            writer.writerow({'dataset': name, 'with_lift_mse': full['mse'], 'without_lift_mse': base['mse'],
-                'mse_delta_with_minus_without': full['mse']-base['mse'],
-                'with_lift_mae': full['mae'], 'without_lift_mae': base['mae'],
-                'mae_delta_with_minus_without': full['mae']-base['mae']})
+            for with_lift, without_lift in [('patch-lift', 'patch-base'), ('dag-lift', 'dag-history')]:
+                if not {with_lift, without_lift} <= pair.keys():
+                    continue
+                full, base = pair[with_lift], pair[without_lift]
+                writer.writerow({'dataset': name, 'with_lift_variant': with_lift,
+                    'without_lift_variant': without_lift,
+                    'with_lift_mse': full['mse'], 'without_lift_mse': base['mse'],
+                    'mse_delta_with_minus_without': full['mse']-base['mse'],
+                    'with_lift_mae': full['mae'], 'without_lift_mae': base['mae'],
+                    'mae_delta_with_minus_without': full['mae']-base['mae']})
+    fields = ['dataset', 'reference_variant', 'variant', 'mse_delta', 'mae_delta']
+    with (output/'component_comparison.csv').open('w', newline='') as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for name in dict.fromkeys(row['dataset'] for row in rows):
+            pair = {row['variant']: row for row in rows if row['dataset'] == name and row['status'] == 'ok'}
+            for reference, variant in [('y-base', 'patch-base'), ('patch-base', 'patch-lift'),
+                                       ('patch-base', 'dag'), ('patch-lift', 'dag')]:
+                if {reference, variant} <= pair.keys():
+                    writer.writerow({'dataset': name, 'reference_variant': reference, 'variant': variant,
+                        'mse_delta': pair[variant]['mse']-pair[reference]['mse'],
+                        'mae_delta': pair[variant]['mae']-pair[reference]['mae']})
 
 
 def main(argv=None):
@@ -234,8 +254,10 @@ def main(argv=None):
     root = args.root.resolve()
     try:
         datasets, variants = selections(args)
-        if 'dag-lift' in variants and args.lag_estimator == 'fft' and args.history_steps < 3:
+        if {'dag-lift', 'patch-lift'} & set(variants) and args.lag_estimator == 'fft' and args.history_steps < 3:
             raise ValueError('FFT local peaks need at least 3 history steps')
+        if {'patch-base', 'patch-lift'} & set(variants) and args.patch_encoder != 'ttcn':
+            raise ValueError('patch-base/patch-lift require --patch-encoder ttcn')
         plans = preflight(root, args, datasets)
     except (ValueError, OSError, KeyError) as error:
         p.error(str(error))

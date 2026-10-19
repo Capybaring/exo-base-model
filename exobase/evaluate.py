@@ -1,7 +1,7 @@
 """Re-evaluate a saved checkpoint with the unified masked DAG-scale metrics.
 
 No optimization, normalization change, or checkpoint modification is performed.
-Works with architecture-v2/v3 checkpoints, including old evaluation metadata.
+Works with architecture-v2/v3/v4 checkpoints, including old evaluation metadata.
 """
 import argparse
 import json
@@ -70,7 +70,7 @@ def main(argv=None):
                                 statistics, include_baselines=True)
     result = {'checkpoint': str(checkpoint), 'split': args.split,
         'data_sha256': manifest['data_sha256'],
-        'evaluation_protocol': evaluation_protocol(statistics),
+        'evaluation_protocol': saved_protocol or evaluation_protocol(statistics),
         'checkpoint_selection': {'best_epoch': saved.get('best_epoch'),
             'saved_best_validation_mse': saved.get('best_validation_mse'),
             'metric_scale': 'train_standard' if saved_protocol is not None else 'model_minmax',

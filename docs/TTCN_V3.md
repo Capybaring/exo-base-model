@@ -1,5 +1,7 @@
 # 架构 v3：完整 TTCN patch → 向量 DAG → 向量 LIFT
 
+本文保留 v3 DAG 变体与旧 checkpoint 的说明。当前训练默认是 [v4 的 Y-only 主干与分组 TTCN](Y_BASE_V4.md)，不使用本文的 DAG 迁移和辅助任务。
+
 新训练默认 `--patch-encoder ttcn`，manifest 的 architecture_version=3。
 
 ## Patch 内编码

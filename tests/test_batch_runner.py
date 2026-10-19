@@ -55,7 +55,7 @@ def test_inventory_windows_and_matched_ablation_commands(tmp_path):
 
 def test_selection_rejects_conflicts_and_duplicates():
     args = runner.parser().parse_args(['--no-lift'])
-    assert runner.selections(args)[1] == ['dag-history']
+    assert runner.selections(args)[1] == ['patch-base']
     for flags in [['--no-lift', '--variants', 'dag'], ['--datasets', 'BE', 'BE'],
                   ['--variants', 'dag-lift', 'dag-lift']]:
         with pytest.raises(ValueError):
@@ -126,9 +126,42 @@ def test_single_dataset_no_lift_alias_trains_without_refiner(tmp_path):
           '--epochs', '1', '--max-records', '8', '--d-model', '8', '--n-heads', '2',
           '--state-num', '2', '--threads', '1', '--save-path', str(output)])
     manifest = json.loads((output/'manifest.json').read_text())
-    assert manifest['args']['no_lift'] and manifest['args']['variant'] == 'dag-history'
-    assert manifest['model_config']['variant'] == 'dag-history'
+    assert manifest['args']['no_lift'] and manifest['args']['variant'] == 'patch-base'
+    assert manifest['model_config']['variant'] == 'patch-base'
     assert manifest['lag_protocol'] is None and not (output/'test_lags.csv').exists()
+
+
+def test_simple_three_variant_training_reload_and_component_comparison(tmp_path):
+    data=prepared_be(tmp_path); output=tmp_path/'simple'
+    assert runner.main(['--datasets','BE','--data-dir',str(data),'--device','cpu',
+        '--variants','y-base','patch-base','patch-lift','--smoke','--threads','1',
+        '--output-dir',str(output)])==0
+    rows=list(csv.DictReader((output/'summary.csv').open()))
+    assert len(rows)==3 and all(r['status']=='ok' for r in rows)
+    manifests=[json.loads((output/'BE'/v/'manifest.json').read_text()) for v in
+               ['y-base','patch-base','patch-lift']]
+    for m in manifests:
+        assert m['architecture_version']==4 and m['args']['beta']==0
+        assert m['record_ids']==manifests[0]['record_ids']
+        assert m['normalization']==manifests[0]['normalization']
+        assert m['patch_protocol']['auxiliary_targets'] is None
+    assert manifests[0]['args']['patch_encoder']=='mean'
+    assert not manifests[1]['known_future_x'] and manifests[2]['known_future_x']
+    assert not manifests[2]['lag_protocol']['leader_stream_detached']
+    comparisons=list(csv.DictReader((output/'component_comparison.csv').open()))
+    assert len(comparisons)==2
+    pair=list(csv.DictReader((output/'ablation_comparison.csv').open()))
+    assert pair[0]['with_lift_variant']=='patch-lift' and pair[0]['without_lift_variant']=='patch-base'
+    from exobase.evaluate import main as evaluate
+    from exobase.predict import main as predict
+    folder=output/'BE'/'patch-lift'
+    result=evaluate(['--checkpoint',str(folder/'best_model.pt'),'--threads','1'])
+    original=json.loads((folder/'metrics.json').read_text())
+    assert result['test']['mse']==pytest.approx(original['test']['mse'],rel=1e-6)
+    assert 'future Y only' in result['evaluation_protocol']['training_objective']
+    predict(['--checkpoint',str(folder/'best_model.pt'),'--threads','1',
+             '--output',str(folder/'pred.csv'),'--lag-output',str(folder/'lags.csv')])
+    assert (folder/'lags.csv').read_bytes()==(folder/'test_lags.csv').read_bytes()
 
 
 def test_failed_job_is_reported_and_next_variant_still_runs(tmp_path, monkeypatch):

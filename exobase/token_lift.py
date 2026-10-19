@@ -91,11 +91,15 @@ def align_token_exogenous(x, future, xm, fm, estimates):
 
 
 class TokenLeadRefiner(nn.Module):
-    def __init__(self, history, horizon, targets, leaders, features, states, mode):
+    def __init__(self, history, horizon, targets, leaders, features, states, mode,
+                 detach_leaders=True):
         super().__init__()
         if mode not in ('prefix', 'global'):
             raise ValueError('Unknown token LIFT mode')
         self.horizon, self.k, self.mode = horizon, leaders, mode
+        # Legacy DAG checkpoints used observed scalar-style detached leaders.
+        # Separate learned X encoders must receive the final forecasting loss.
+        self.detach_leaders = detach_leaders
         self.temperature = nn.Parameter(torch.ones(()))
         freq = horizon//2+1
         self.factory = FilterFactory(leaders, history*features, targets,
@@ -111,7 +115,8 @@ class TokenLeadRefiner(nn.Module):
         filters, _ = self.factory(filled.flatten(-2), feature)
         filters = filters.reshape(*base.shape[:2], 2*self.k+1, -1)
         usable = available & estimates['leader_valid'][..., None]
-        aligned = torch.where(usable[..., None], aligned.detach(), 0)
+        controls = aligned.detach() if self.detach_leaders else aligned
+        aligned = torch.where(usable[..., None], controls, 0)
         if self.mode == 'prefix':
             prefix = torch.ones(self.horizon, self.horizon, dtype=torch.bool,
                                 device=base.device).tril()

@@ -1,4 +1,4 @@
-"""Train DAG/X-to-Y LIFT baselines (and explicit legacy t-PatchGNN variants)."""
+"""Train Y temporal baselines, patch/LIFT, and retained DAG comparisons."""
 import argparse
 from dataclasses import asdict
 import json
@@ -29,11 +29,12 @@ def parser():
     p.add_argument('--forecast', type=float, default=7200, help='Future duration, seconds')
     p.add_argument('--patch-seconds', type=float, default=60)
     p.add_argument('--patch-stride', type=float, default=None, help='Seconds; defaults to patch width')
-    p.add_argument('--variant', choices=['dag-history', 'dag', 'dag-lift', 'tpatch-y', 'tpatch', 'exo', 'delay'], default='dag-lift')
+    p.add_argument('--variant', choices=['y-base', 'patch-base', 'patch-lift',
+        'dag-history', 'dag', 'dag-lift', 'tpatch-y', 'tpatch', 'exo', 'delay'], default='patch-lift')
     p.add_argument('--no-lift', action='store_true',
-        help='Ablate only LIFT: use the unchanged history-driven DAG base (dag-history)')
+        help='patch-lift -> patch-base; legacy dag-lift -> dag-history')
     p.add_argument('--patch-encoder', choices=['ttcn', 'mean'], default='ttcn',
-        help='DAG input: full point/time TTCN tokens (default); mean is the explicit v2 baseline')
+        help='Full TTCN tokens; y-base always uses fixed-bin means; legacy DAG also supports mean')
     p.add_argument('--split', choices=['official-random', 'chronological'], default='chronological')
     p.add_argument('--normalization', choices=['seen', 'train'], default='train')
     p.add_argument('--batch-size', type=int, default=2)
@@ -48,7 +49,7 @@ def parser():
     p.add_argument('--node-dim', type=int, default=10)
     p.add_argument('--graph-hops', type=int, default=2)
     p.add_argument('--alpha', type=float, default=.5, help='DAG temporal/covariate mixture')
-    p.add_argument('--beta', type=float, default=.1, help='DAG masked auxiliary loss weight')
+    p.add_argument('--beta', type=float, default=.1, help='Legacy DAG auxiliary loss weight; Y/patch variants use zero')
     p.add_argument('--dropout', type=float, default=.1)
     p.add_argument('--lag-estimator', choices=['fft', 'pearson'], default='fft',
         help='Official circular FFT/local peaks (default), or legacy masked noncircular Pearson')
@@ -87,22 +88,31 @@ def main(argv=None):
         p.set_defaults(**settings)
     args = p.parse_args(argv)
     if args.no_lift:
-        if args.variant not in ('dag-lift', 'dag-history'):
-            p.error('--no-lift applies to dag-lift/dag-history; --variant dag is a separate direct-future-X baseline')
-        args.variant = 'dag-history'
+        without = {'patch-lift': 'patch-base', 'patch-base': 'patch-base',
+                   'dag-lift': 'dag-history', 'dag-history': 'dag-history'}
+        if args.variant not in without:
+            p.error('--no-lift applies to patch-lift/patch-base or legacy dag-lift/dag-history')
+        args.variant = without[args.variant]
+    simple = args.variant in ('y-base', 'patch-base', 'patch-lift')
+    if simple:
+        args.beta = 0.
+        if args.variant == 'y-base':
+            args.patch_encoder = 'mean'
+        elif args.patch_encoder != 'ttcn':
+            p.error('patch-base/patch-lift require --patch-encoder ttcn')
     if not args.data_path:
         p.error('--data-path or a preset containing data_path is required')
     if min(args.epochs, args.patience, args.batch_size, args.threads) < 1 or args.lr <= 0:
         p.error('Training counts and learning rate must be positive')
     args.patch_stride = args.patch_seconds if args.patch_stride is None else args.patch_stride
-    if args.variant.startswith('dag') and (args.patch_stride != args.patch_seconds
+    if (args.variant.startswith('dag') or simple) and (args.patch_stride != args.patch_seconds
             or not all(math.isclose(d/args.patch_seconds, round(d/args.patch_seconds))
                        for d in (args.history, args.forecast))):
-        p.error('DAG/LIFT requires nonoverlapping patches and history/forecast aligned to the patch grid')
-    if (args.variant == 'dag-lift' and args.lag_estimator == 'pearson'
+        p.error('Temporal/DAG/LIFT requires nonoverlapping patches and history/forecast aligned to the patch grid')
+    if (args.variant in ('dag-lift', 'patch-lift') and args.lag_estimator == 'pearson'
             and round(args.history/args.patch_seconds) < args.min_pairs + 1):
         p.error('History must contain at least min-pairs+1 patch bins for a positive lag')
-    if (args.variant == 'dag-lift' and args.lag_estimator == 'fft'
+    if (args.variant in ('dag-lift', 'patch-lift') and args.lag_estimator == 'fft'
             and round(args.history/args.patch_seconds) < 3):
         p.error('Official FFT local peaks require at least 3 history patch bins')
     if args.variant == 'delay' and (args.patch_stride != args.patch_seconds
@@ -164,8 +174,8 @@ def main(argv=None):
         'table_shape': list(table.values.shape), 'variable_order_y_then_x': list(table.names),
         'incomplete_tail_seconds': float(table.time[-1] % records.duration),
         'normalization_scope': 'train+validation (official seen_data)' if args.normalization == 'seen' else 'train only',
-        'known_future_x': args.variant in ('dag', 'dag-lift', 'exo', 'delay'), 'pattern_bank': pattern_info,
-        'architecture_version': 3 if args.variant.startswith('dag') and args.patch_encoder == 'ttcn' else 2,
+        'known_future_x': args.variant in ('patch-lift', 'dag', 'dag-lift', 'exo', 'delay'), 'pattern_bank': pattern_info,
+        'architecture_version': 4 if simple else (3 if args.variant.startswith('dag') and args.patch_encoder == 'ttcn' else 2),
         'backbone': (('DAG dual attention on full TTCN tokens' if args.patch_encoder == 'ttcn'
                       else 'DAG dual attention on masked patch means')
                      if args.variant.startswith('dag') else 'legacy t-PatchGNN'),
@@ -195,11 +205,38 @@ def main(argv=None):
                     'dag_model': 'f4468901331f53bb84bbc405219150df997e26c5',
                     'lift': '79cf8f157bb9a616c9733daf1e9c2cfefdc98c94',
                     'pdformer': 'f8c8f6ad007a04fad3baee958b89504711852ce9'}}
+    if simple:
+        manifest['backbone'] = 'Y-only shared temporal attention, compact direct multi-step head; no DAG transfer'
+        manifest['evaluation_protocol']['training_objective'] = 'MinMax masked variable-macro MSE on future Y only'
+        manifest['patch_protocol'] = {
+            'encoder': ('fixed-bin observed scalar means, no TTCN' if args.variant == 'y-base'
+                        else 'unchanged point/time TTCN, shared within each X/Y role'),
+            'features': args.d_model, 'scalar_mean_before_backbone': args.variant == 'y-base',
+            'separate_x_y_encoders': args.variant == 'patch-lift',
+            'future_x_encoder': 'shared with historical X' if args.variant == 'patch-lift' else None,
+            'decoder': 'forecast Y token + actual query-time embedding from Y encoder',
+            'auxiliary_targets': None}
+        if args.variant == 'patch-lift':
+            manifest['lag_protocol'] = {
+                'direction': 'X->Y only', 'lag_estimator': args.lag_estimator,
+                'estimator': ('circular FFT/local peaks' if args.lag_estimator == 'fft'
+                              else 'masked noncircular Pearson'),
+                'feature_space': 'observed scalar patch means; lag diagnostics only',
+                'scalar_mean_before_backbone': False,
+                'positive_lags_only': True,
+                'max_lag_seconds': ((config.history_patches-2) if args.lag_estimator == 'fft'
+                    else min(args.max_lag, config.history_patches-1))*args.patch_seconds,
+                'min_pairs': args.min_pairs if args.lag_estimator == 'pearson' else None,
+                'min_correlation': args.min_correlation if args.lag_estimator == 'pearson' else None,
+                'pair_count': 'circular observed pairs' if args.lag_estimator == 'fft' else 'noncircular observed pairs',
+                'leader_stream_detached': False, 'feature_mapping': 'learned normalized X->Y linear map',
+                'refiner_mode': args.refiner_mode, 'future_x_bypass': False,
+                'learned_lag_estimator': False}
     (output/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     print('Variant:', args.variant, 'records:', {k: len(v) for k, v in splits.items()},
           'parameters:', sum(x.numel() for x in model.parameters()), flush=True)
     print('Evaluation: train-only Z-score, observed targets, variable macro; '
-          'training objective: MinMax MSE + auxiliary', flush=True)
+          'training objective: '+('future-Y MinMax MSE only' if simple else 'MinMax MSE + auxiliary'), flush=True)
     best, best_epoch, best_state, stale, history = float('inf'), 0, None, 0, []
     for epoch in range(args.epochs):
         model.train(); start = time.perf_counter(); steps = 0
@@ -241,7 +278,7 @@ def main(argv=None):
         'evaluation_protocol': manifest['evaluation_protocol'],
         'training_history': history, 'smoke_test': args.max_records is not None}
     (output/'metrics.json').write_text(json.dumps(results, indent=2, allow_nan=False))
-    if args.variant == 'dag-lift':
+    if args.variant in ('dag-lift', 'patch-lift'):
         from .lag_export import export_lags
         export_lags(model, loaders['test'], args.device, output/'test_lags.csv',
                     args.targets, args.exog, args.patch_seconds)
