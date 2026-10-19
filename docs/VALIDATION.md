@@ -1,5 +1,7 @@
 # 验证记录
 
+2026-10-19 批量运行与无 LIFT 消融：全套测试 85 项通过，新增 8 项覆盖 13 数据集清单/时间换算、配对命令一致性、缺失文件预检查、仅移除 LIFT 的训练/权重、CSV 差值汇总、失败任务继续及旧结果保护。13 份真实数据的 24→24 步完整预检查通过，生成 26 条有/无 LIFT 命令，未代跑完整训练。TTCN、DAG 基础预测、LIFT 方程、数据和原配置未改。入口和比较边界见 [批量运行与消融](BATCH_RUNS.md)。
+
 2026-10-18 LIFT 官方对齐：全套 `python -m pytest -q` 共 77 项通过。新增 17 项检查覆盖固定官方代码的奇偶长度 FFT 相关/lag/Top-K 数值对照、一般向量直接循环点积参考、共享多特征历史的逐特征官方 refiner 对照（单/多状态及正/负/小温度）、无效/完全缺失 leader 的差分屏蔽、默认配置与旧 checkpoint 算法恢复。TTCN 编码器、data.py、FilterFactory/ComplexLinear 与 upstream 参照逐字节不变；token_dag 的 patch 编码、基础预测、辅助监督和查询解码方法未改。已有训练/导出/重载测试也覆盖新默认 fft/global。尚未重训正式数据集，不能据此声称精度提升。详情见 [LIFT 官方对齐说明](LIFT_OFFICIAL.md)。
 
 以下 TTCN 发布记录及 v2 记录描述各自当时的 Pearson/prefix 行为，当前默认已更新为 fft/global。

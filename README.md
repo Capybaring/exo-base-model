@@ -39,15 +39,28 @@ Patch 延续 t-PatchGNN 的**固定真实时间区间归属**：同一块内每�
 
 | 配置 | Y / X | 历史 / 预测 | Patch 宽度 | 最大候选时延 |
 |---|---|---|---|---|
-| configs/DIST.json | 9 个 PV / 9 个 OP | 4 小时 / 2 小时 | 60 秒 | 60 块 = 60 分钟 |
-| configs/BE.json | OT / 两个预测协变量 | 168 小时 / 24 小时 | 1 小时 | 48 块 = 48 小时 |
-| configs/NP.json | OT / 两个预测协变量 | 168 小时 / 24 小时 | 1 小时 | 48 块 = 48 小时 |
+| configs/DIST.json | 9 个 PV / 9 个 OP | 4 小时 / 2 小时 | 60 秒 | FFT：238 块 = 238 分钟 |
+| configs/BE.json | OT / 两个预测协变量 | 168 小时 / 24 小时 | 1 小时 | FFT：166 块 = 166 小时 |
+| configs/NP.json | OT / 两个预测协变量 | 168 小时 / 24 小时 | 1 小时 | FFT：166 块 = 166 小时 |
 
 BE/NP 变量名的前导空格保留原样。时间参数单位为秒。默认 LIFT 按官方循环 FFT/局部峰值在 1…L−2 个历史块中搜索，max_lag/min_pairs/min_correlation 仅用于显式 Pearson 对照。DAG 变体要求非重叠、历史和预测边界对齐的 Patch。
 
 空块不删除、不压缩时间，TTCN 输出全零及非空标记 0。滞后估计使用非空 mask，仅统计有效 patch 对。每个未来块输出完整特征 token，再结合真实查询时间解码，因此同一块内不再强制输出常数。滞后网格的分辨率仍为 patch 宽度。
 
 ## 训练与消融
+
+全部数据与无 LIFT 消融使用新的统一入口，默认 **24→24 步**（DIST 为小时 patch，其余按原生间隔）；不会沿用上述单数据集 JSON 的历史/预测时长：
+
+```bash
+python -u scripts/run_all.py --device cuda:0
+python -u scripts/run_all.py --device cuda:0 --no-lift
+# 或一次完成有/无 LIFT 的独立训练，并汇总配对误差
+python -u scripts/run_all.py --device cuda:0 --variants dag-lift dag-history
+```
+
+这三条是独立运行或成对运行的不同选择。默认覆盖 DIST 加 12 个 Table-3 数据集，`--suite table3` 排除 DIST，`--datasets BE NP` 可选子集。无 LIFT 使用 dag-history，保留原基础预测路径；已知未来 X 直接输入的 dag 是另一项对照，可追加到 variants。完整数据清单、时间单位、单数据集 `--no-lift`、日志和汇总说明见 [批量运行与消融](docs/BATCH_RUNS.md)。
+
+单数据集直接按 JSON 预设运行：
 
 ```bash
 python -u -m exobase.train --config configs/DIST.json

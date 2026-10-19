@@ -30,6 +30,8 @@ def parser():
     p.add_argument('--patch-seconds', type=float, default=60)
     p.add_argument('--patch-stride', type=float, default=None, help='Seconds; defaults to patch width')
     p.add_argument('--variant', choices=['dag-history', 'dag', 'dag-lift', 'tpatch-y', 'tpatch', 'exo', 'delay'], default='dag-lift')
+    p.add_argument('--no-lift', action='store_true',
+        help='Ablate only LIFT: use the unchanged history-driven DAG base (dag-history)')
     p.add_argument('--patch-encoder', choices=['ttcn', 'mean'], default='ttcn',
         help='DAG input: full point/time TTCN tokens (default); mean is the explicit v2 baseline')
     p.add_argument('--split', choices=['official-random', 'chronological'], default='chronological')
@@ -84,6 +86,10 @@ def main(argv=None):
             p.error(f'Unknown configuration settings: {sorted(unknown)}')
         p.set_defaults(**settings)
     args = p.parse_args(argv)
+    if args.no_lift:
+        if args.variant not in ('dag-lift', 'dag-history'):
+            p.error('--no-lift applies to dag-lift/dag-history; --variant dag is a separate direct-future-X baseline')
+        args.variant = 'dag-history'
     if not args.data_path:
         p.error('--data-path or a preset containing data_path is required')
     if min(args.epochs, args.patience, args.batch_size, args.threads) < 1 or args.lr <= 0:
