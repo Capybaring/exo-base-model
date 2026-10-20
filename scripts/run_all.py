@@ -29,7 +29,7 @@ STEPS = {'DIST': 3600, 'NP': 3600, 'PJM': 3600, 'BE': 3600, 'FR': 3600,
 VARIANTS = ('y-base', 'patch-base', 'patch-lift', 'dag-lift', 'dag-history', 'dag')
 SIMPLE = ('y-base', 'patch-base', 'patch-lift')
 OVERRIDES = ('epochs', 'patience', 'batch_size', 'd_model', 'n_heads', 'n_layers',
-             'state_num', 'lr', 'alpha', 'beta')
+             'state_num', 'lr', 'alpha', 'beta', 'sample_stride')
 
 
 def parser():
@@ -55,7 +55,7 @@ def parser():
     p.add_argument('--lag-estimator', choices=['fft', 'pearson'], default='fft')
     p.add_argument('--refiner-mode', choices=['global', 'prefix'], default='global')
     for name in OVERRIDES:
-        p.add_argument('--'+name.replace('_', '-'), type=float if name in ('lr', 'alpha', 'beta') else int)
+        p.add_argument('--'+name.replace('_', '-'), type=float if name in ('lr', 'alpha', 'beta', 'sample_stride') else int)
     p.add_argument('--dry-run', action='store_true', help='Validate every dataset and print commands; no outputs')
     p.add_argument('--smoke', action='store_true', help='Eight records, one epoch, small model; not accuracy results')
     p.add_argument('--fail-fast', action='store_true', help='Stop after the first failed training job')
@@ -119,7 +119,8 @@ def task_settings(root, args, name):
 
 def preflight(root, args, datasets):
     import numpy as np
-    from exobase.data import load_long_table, TimeRecords, split_records, normalization_from_seen
+    from types import SimpleNamespace
+    from exobase.data import load_long_table, records_from_settings, normalization_from_seen
     from exobase.metrics import fit_evaluation_statistics
     from exobase.prepare import sha256
     plans, errors = [], []
@@ -141,16 +142,18 @@ def preflight(root, args, datasets):
                         not np.allclose(gaps/native_step, np.rint(gaps/native_step))):
                     raise ValueError(f'expected native interval {native_step}s; check timestamp units')
             history, forecast = task['history_seconds'], task['forecast_seconds']
-            records = TimeRecords(table, history, forecast, len(config['targets']))
-            if args.smoke:
-                records.records = records.records[:8]
-            split = split_records(records, 'chronological')
+            records, split = records_from_settings(table, SimpleNamespace(history=history,
+                forecast=forecast, targets=config['targets'], split='chronological',
+                sample_stride=args.sample_stride, max_records=8 if args.smoke else None))
             if not all(split.values()):
                 raise ValueError('train/validation/test split must each contain records')
             normalization_from_seen(records, split['train'])
             fit_evaluation_statistics(records, split['train'])
             record_ids = {key: [records.records[i][0] for i in ids] for key, ids in split.items()}
             plan = {'dataset': name, **task, 'valid_records': len(records),
+                    'sample_stride_seconds': records.stride,
+                    'sampling_mode': 'rolling' if records.rolling else 'disjoint',
+                    'split_boundaries_seconds': records.split_boundaries,
                     'record_ids': record_ids, 'split_records': {k: len(v) for k, v in split.items()},
                     'config': str(config_path), 'data_path': str(source), 'data_sha256': sha256(source)}
             plans.append(plan)
@@ -319,7 +322,7 @@ def main(argv=None):
         'datasets': plans, 'variants': variants, 'jobs': jobs}, ensure_ascii=False, indent=2))
     print(f'Running {len(jobs)} sequential jobs. Results: {output}', flush=True)
     fields = ['dataset', 'variant', 'status', 'seed', 'protocol', 'history_steps', 'forecast_steps',
-              'history_seconds', 'forecast_seconds', 'step_seconds',
+              'history_seconds', 'forecast_seconds', 'step_seconds', 'sampling_mode', 'sample_stride_seconds',
               'mse', 'mae', 'rmse', 'persistence_mse', 'persistence_mae',
               'best_epoch', 'metric_scale', 'metric_reduction', 'smoke_test', 'log', 'metrics']
     rows = []
@@ -332,7 +335,7 @@ def main(argv=None):
             plan = by_name[job['dataset']]
             log_path = output/f'{job["dataset"]}_{job["variant"]}.log'
             row = {key: plan[key] for key in ('dataset', 'protocol', 'history_steps', 'forecast_steps',
-                'history_seconds', 'forecast_seconds', 'step_seconds')}
+                'history_seconds', 'forecast_seconds', 'step_seconds', 'sampling_mode', 'sample_stride_seconds')}
             row.update(variant=job['variant'], seed=args.seed, smoke_test=args.smoke,
                        log=str(log_path), metrics=str(output/job['dataset']/job['variant']/'metrics.json'))
             print('\n'+shlex.join(job['command']), flush=True)

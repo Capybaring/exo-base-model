@@ -113,24 +113,41 @@ def _assemble_long_table(pieces, names, datetime_mode):
 
 
 class TimeRecords(Dataset):
-    """Adapt one continuous series to disjoint t-PatchGNN-style records.
+    """Adapt one continuous series to physical-time forecasting records.
 
     Full records span [start, start+history+forecast). The final incomplete
     record and records without history/target observations are reported/skipped.
-    No interpolation, gap compression, or overlapping train/test windows.
+    Optional stride enables rolling origins; patches are constructed separately.
+    Missing timestamps never compress the physical clock.
     """
-    def __init__(self, table, history, forecast, target_dim):
+    def __init__(self, table, history, forecast, target_dim, stride=None):
         if history <= 0 or forecast <= 0:
             raise ValueError('history and forecast must be positive seconds')
         self.table, self.history, self.forecast = table, history, forecast
         self.target_dim = target_dim
         self.duration = history + forecast
+        self.rolling = stride is not None
+        self.stride = self.duration if stride is None else stride
+        if not np.isfinite(self.stride) or self.stride <= 0:
+            raise ValueError('sample stride must be positive finite seconds')
+        # Rolling coverage includes the final stride bin containing an observation.
+        # The legacy disjoint endpoint convention is retained for old checkpoints.
+        self.coverage_end = ((math.floor(table.time[-1]/self.stride)+1)*self.stride
+                             if self.rolling else float(table.time[-1]))
+        slots = round(self.coverage_end/self.stride)
+        self.split_boundaries = [math.floor(slots*.6)*self.stride,
+                                 math.floor(slots*.8)*self.stride] if self.rolling else None
         if table.time[0] < 0:
             raise ValueError('Relative seconds must be nonnegative')
         self.records = []
         self.skipped = 0
-        for rid in range(int(table.time[-1] // self.duration)):
-            start = rid * self.duration
+        count = (max(0, math.floor((self.coverage_end-self.duration)/self.stride)+1)
+                 if self.rolling else int(table.time[-1] // self.duration))
+        self.incomplete_tail_seconds = (max(0., self.coverage_end-
+            ((count-1)*self.stride+self.duration)) if self.rolling and count else
+            float(table.time[-1] % self.duration))
+        for rid in range(count):
+            start = rid * self.stride
             a, h, b = np.searchsorted(table.time, [start, start+history, start+self.duration])
             if not table.mask[a:h].any() or not table.mask[h:b, :target_dim].any():
                 self.skipped += 1
@@ -144,12 +161,27 @@ class TimeRecords(Dataset):
 
     def __getitem__(self, index):
         rid, a, h, b = self.records[index]
-        return (rid, self.table.time[a:b] - rid*self.duration,
+        return (rid, self.table.time[a:b] - rid*self.stride,
                 self.table.values[a:b], self.table.mask[a:b])
 
 
 def split_records(records, protocol='official-random'):
     """Official parse_datasets: 80% seen, then 75% of seen for training."""
+    if records.rolling:
+        if protocol != 'chronological':
+            raise ValueError('Rolling samples require chronological splits to avoid label leakage')
+        first, second = records.split_boundaries
+        splits = {'train': [], 'val': [], 'test': []}
+        for i, (rid, _, _, _) in enumerate(records.records):
+            origin = rid*records.stride + records.history
+            end = origin + records.forecast
+            if end <= first:
+                splits['train'].append(i)
+            elif origin >= first and end <= second:
+                splits['val'].append(i)
+            elif origin >= second and end <= records.coverage_end:
+                splits['test'].append(i)
+        return splits
     if protocol == 'chronological':
         n = len(records)
         a, b = int(n*.6), int(n*.8)
@@ -162,13 +194,54 @@ def split_records(records, protocol='official-random'):
     return {'train': train.tolist(), 'val': val.tolist(), 'test': test.tolist()}
 
 
+def records_from_settings(table, settings):
+    """One construction path for training, checkpoint reload and batch preflight."""
+    records = TimeRecords(table, settings.history, settings.forecast, len(settings.targets),
+                          stride=getattr(settings, 'sample_stride', None))
+    records.full_count = len(records)
+    full_splits = split_records(records, settings.split)
+    records.boundary_crossing_count = len(records)-sum(map(len, full_splits.values()))
+    limit = getattr(settings, 'max_records', None)
+    if limit is not None:
+        if limit < 5:
+            raise ValueError('max-records must be at least five')
+        if records.rolling:
+            splits = full_splits
+            # Smoke runs must sample all physical partitions, not re-split the prefix.
+            quotas = (int(limit*.6), int(limit*.8)-int(limit*.6), limit-int(limit*.8))
+            chosen = sorted(i for ids, quota in zip(splits.values(), quotas) for i in ids[:quota])
+            records.records = [records.records[i] for i in chosen]
+        else:
+            records.records = records.records[:limit]
+    splits = split_records(records, settings.split)
+    if not all(splits.values()):
+        raise ValueError('train/validation/test split must each contain records')
+    return records, splits
+
+
+def observation_ranges(records, indices):
+    """Raw row ranges; merge overlaps so scaler cells are counted once."""
+    ranges = [(records.records[i][1], records.records[i][3]) for i in indices]
+    if not records.rolling:
+        return ranges
+    merged = []
+    for a, b in sorted(ranges):
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+        else:
+            merged.append((a, b))
+    return merged
+
+
 def normalization_from_seen(records, indices):
     """Match official get_data_min_max(seen_data): train+validation, not test."""
     dim = records.table.values.shape[1]
     low, high, time_max = np.full(dim, np.inf), np.full(dim, -np.inf), 0.
     for i in indices:
-        _, t, v, m = records[i]
-        time_max = max(time_max, float(t.max()))
+        rid, a, _, b = records.records[i]
+        time_max = max(time_max, float(records.table.time[b-1]-rid*records.stride))
+    for a, b in observation_ranges(records, indices):
+        v, m = records.table.values[a:b], records.table.mask[a:b]
         for j in range(dim):
             observed = v[m[:, j], j]
             if len(observed):

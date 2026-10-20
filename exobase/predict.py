@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from .data import load_long_table, TimeRecords
+from .data import load_long_table, records_from_settings
 from .model import build_model, ModelConfig
 from .prepare import sha256
 from .train import make_collator
@@ -41,9 +41,7 @@ def main(argv=None):
     if sha256(source) != manifest['data_sha256']:
         p.error('Dataset differs from the checkpoint manifest; use the original prepared file')
     table = load_long_table(source, settings.targets, settings.exog)
-    records = TimeRecords(table, settings.history, settings.forecast, len(settings.targets))
-    if settings.max_records is not None:
-        records.records = records.records[:settings.max_records]
+    records, _ = records_from_settings(table, settings)
     ids = manifest['record_indices'][args.split]
     if [records.records[i][0] for i in ids] != manifest['record_ids'][args.split]:
         p.error('Record boundaries differ from the saved split')
@@ -72,7 +70,7 @@ def main(argv=None):
             mask = batch['mask_predicted_data'].numpy()
             for b, rid in enumerate(batch['record_ids'].tolist()):
                 for q in range(int(batch['query_lengths'][b])):
-                    stamp = float(batch['query_time_seconds'][b,q])+rid*records.duration
+                    stamp = float(batch['query_time_seconds'][b,q])+rid*records.stride
                     for j, name in enumerate(settings.targets):
                         writer.writerow([rid, stamp, name, float(prediction[b,q,j]),
                             int(mask[b,q,j]), float(actual[b,q,j]) if mask[b,q,j] else ''])

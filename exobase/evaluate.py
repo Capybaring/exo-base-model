@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from .data import load_long_table, TimeRecords
+from .data import load_long_table, records_from_settings
 from .metrics import evaluate_irregular, fit_evaluation_statistics, evaluation_protocol
 from .model import build_model, ModelConfig
 from .prepare import sha256
@@ -47,9 +47,7 @@ def main(argv=None):
     if sha256(source) != manifest['data_sha256']:
         p.error('Dataset differs from checkpoint manifest; use the original prepared file')
     table = load_long_table(source, settings.targets, settings.exog)
-    records = TimeRecords(table, settings.history, settings.forecast, len(settings.targets))
-    if settings.max_records is not None:
-        records.records = records.records[:settings.max_records]
+    records, _ = records_from_settings(table, settings)
     for split, ids in manifest['record_indices'].items():
         if [records.records[i][0] for i in ids] != manifest['record_ids'][split]:
             p.error('Record boundaries differ from saved splits')

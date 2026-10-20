@@ -11,8 +11,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from .data import (DIST_TARGETS, DIST_EXOG, load_long_table, TimeRecords,
-    split_records, normalization_from_seen, IrregularCollator)
+from .data import (DIST_TARGETS, DIST_EXOG, load_long_table, records_from_settings,
+    normalization_from_seen, IrregularCollator)
 from .metrics import (masked_mse, evaluate_irregular, fit_evaluation_statistics,
     evaluation_protocol)
 from .model import ModelConfig, build_model
@@ -31,6 +31,8 @@ def parser():
     p.add_argument('--forecast', type=float, default=7200, help='Future duration, seconds')
     p.add_argument('--patch-seconds', type=float, default=60)
     p.add_argument('--patch-stride', type=float, default=None, help='Seconds; defaults to patch width')
+    p.add_argument('--sample-stride', type=float, default=None,
+                   help='Rolling sample origins in seconds (3600 = hourly); omitted = legacy disjoint records')
     p.add_argument('--variant', choices=['y-base', 'patch-base', 'patch-lift',
         'dag-history', 'dag', 'dag-lift', 'tpatch-y', 'tpatch', 'exo', 'delay'], default='patch-lift')
     p.add_argument('--no-lift', action='store_true',
@@ -137,13 +139,11 @@ def main(argv=None):
     torch.set_num_threads(args.threads)
     print('Loading:', args.data_path, flush=True)
     table = load_long_table(args.data_path, args.targets, args.exog)
-    records = TimeRecords(table, args.history, args.forecast, len(args.targets))
-    full_count = len(records)
-    if args.max_records is not None:
-        if args.max_records < 5:
-            p.error('max-records must be at least five')
-        records.records = records.records[:args.max_records]
-    splits = split_records(records, args.split)
+    records, splits = records_from_settings(table, args)
+    full_count = records.full_count
+    print(f'Samples: {"rolling" if records.rolling else "disjoint"}, '
+          f'origin stride={records.stride:g}s; patch width={args.patch_seconds:g}s '
+          f'patch stride={args.patch_stride:g}s', flush=True)
     scale_ids = splits['train']+(splits['val'] if args.normalization == 'seen' else [])
     norm = normalization_from_seen(records, scale_ids)
     # Evaluation scaling is independent of model scaling, as in DAG/TFB.
@@ -177,7 +177,14 @@ def main(argv=None):
             'forecast_seconds': args.forecast, 'patch_seconds': args.patch_seconds,
             'history_patches': config.history_patches, 'future_patches': config.future_patches,
             'window_alignment_only': args.task_protocol in ('dataset-short', 'dataset-long'),
-            'data_protocol': 'irregular observations, disjoint records; not TFB rolling',
+            'data_protocol': ('irregular observations, rolling forecast origins' if records.rolling
+                              else 'irregular observations, disjoint records; not TFB rolling'),
+            'sample_stride_seconds': records.stride,
+            'split_basis': 'physical forecast intervals' if records.rolling else 'record count',
+            'split_boundaries_seconds': records.split_boundaries,
+            'coverage_end_seconds': records.coverage_end,
+            'boundary_crossing_records_excluded': records.boundary_crossing_count,
+            'evaluation_unit': 'observed (forecast origin, lead time, target) pairs',
             'record_split': args.split,
             'chronological_ratios': [0.6, 0.2, 0.2] if args.split == 'chronological' else None},
         'evaluation_protocol': evaluation_protocol(eval_statistics),
@@ -186,7 +193,7 @@ def main(argv=None):
         'record_indices': splits, 'records_before_smoke_limit': full_count,
         'skipped_empty_records': records.skipped, 'duplicates_merged': table.duplicate_rows,
         'table_shape': list(table.values.shape), 'variable_order_y_then_x': list(table.names),
-        'incomplete_tail_seconds': float(table.time[-1] % records.duration),
+        'incomplete_tail_seconds': records.incomplete_tail_seconds,
         'normalization_scope': 'train+validation (official seen_data)' if args.normalization == 'seen' else 'train only',
         'known_future_x': args.variant in ('patch-lift', 'dag', 'dag-lift', 'exo', 'delay'), 'pattern_bank': pattern_info,
         'architecture_version': 4 if simple else (3 if args.variant.startswith('dag') and args.patch_encoder == 'ttcn' else 2),

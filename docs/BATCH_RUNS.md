@@ -82,6 +82,33 @@ full 保留更多反向传播中间结果，显存需求较高。若发生 CUDA 
 
 ## 检查和输出
 
+### BE/NP：12h patch、每小时样本滑窗
+
+在仓库根目录执行，两个数据集依次训练；输出使用新目录：
+
+```bash
+git pull --ff-only origin master
+RUN_ID=$(date +%Y%m%d_%H%M%S)
+for DATASET in NP BE; do
+  python -u -m exobase.train \
+    --config "configs/${DATASET}.json" \
+    --variant patch-lift --patch-encoder ttcn \
+    --task-protocol dataset-short \
+    --history 604800 --forecast 86400 \
+    --patch-seconds 43200 --patch-stride 43200 \
+    --sample-stride 3600 \
+    --lag-estimator fft --refiner-mode global \
+    --split chronological --normalization train \
+    --batch-size 64 --epochs 100 --patience 10 \
+    --device cuda:0 --threads 2 --seed 1 \
+    --save-path "results/rolling_1h_patch12h/${RUN_ID}/${DATASET}/patch-lift" || break
+done
+```
+
+`--sample-stride 3600` 只控制样本起点；`--patch-stride 43200` 保持内部 patch 不重叠。模型和训练损失不改，保留此前 TTCN 默认 chunked 执行。滚动划分、去重缩放与评估单位见 [预测任务标准](FORECAST_TASKS.md)。样本数量显著增加，每轮耗时会增加，不能按旧版 3 个训练 batch 的耗时估算。没有在本地代跑完整精度训练。
+
+批量入口也支持 `--sample-stride 3600` 并将其传给各训练任务；该入口仍读取配置中的 patch 宽度，**不会自动设为 12h**。上面的直接训练命令完整指定了本轮所需设置。summary.csv 新增 sampling_mode/sample_stride_seconds，避免不同采样实验混淆。
+
 ```bash
 # 全部数据与计划预检查，不写结果、不训练
 python -u scripts/run_all.py --device cuda:0 --variants y-base patch-base patch-lift --dry-run

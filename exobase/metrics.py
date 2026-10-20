@@ -8,6 +8,7 @@ Calling evaluate_irregular without scale metadata retains the legacy API.
 """
 import numpy as np
 import torch
+from .data import observation_ranges
 
 
 def error_sums(prediction, target, mask, kind='mse'):
@@ -46,15 +47,15 @@ def fit_evaluation_statistics(records, train_indices):
     """Observed training cells only, before patch aggregation; ddof=0.
 
     Pairwise variance merging avoids cancellation on large-offset variables.
-    TimeRecords are disjoint, so no training observation is counted twice.
+    Overlapping rolling windows are merged so each raw cell is counted once.
     """
     dim = records.target_dim
     count = np.zeros(dim, dtype=np.int64)
     mean, m2 = np.zeros(dim), np.zeros(dim)
     if len(set(train_indices)) != len(train_indices):
         raise ValueError('Duplicate training indices in evaluation statistics')
-    for index in train_indices:
-        _, _, values, mask = records[index]
+    for a, b in observation_ranges(records, train_indices):
+        values, mask = records.table.values[a:b], records.table.mask[a:b]
         for j in range(dim):
             observed = values[mask[:, j], j].astype(np.float64)
             if not len(observed):
@@ -78,7 +79,7 @@ def fit_evaluation_statistics(records, train_indices):
     return {'target_names': list(records.table.names[:dim]),
             'mean': mean.tolist(), 'std': np.sqrt(variance).tolist(),
             'scale': scale.tolist(), 'observed_count': count.tolist(),
-            'scope': 'training records, observed cells only, history and forecast',
+            'scope': 'training records, unique observed cells only, history and forecast',
             'ddof': 0}
 
 
