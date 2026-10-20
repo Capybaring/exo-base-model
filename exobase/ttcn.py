@@ -9,10 +9,13 @@ from torch.utils.checkpoint import checkpoint
 
 
 class TTCNPatchEncoder(nn.Module):
-    def __init__(self, dim, te_dim):
+    def __init__(self, dim, te_dim, execution='chunked'):
         super().__init__()
         if dim < 2 or te_dim < 2:
             raise ValueError('TTCN requires dim >=2 and te_dim >=2')
+        if execution not in ('chunked', 'full'):
+            raise ValueError('TTCN execution must be chunked or full')
+        self.execution = execution
         self.dim, self.te_dim = dim, te_dim
         self.te_scale = nn.Linear(1, 1)
         self.te_periodic = nn.Linear(1, te_dim-1)
@@ -36,6 +39,13 @@ class TTCNPatchEncoder(nn.Module):
         v, t = torch.where(valid, v, 0), torch.where(valid, t, 0)
         if not torch.isfinite(v).all() or not torch.isfinite(t).all():
             raise ValueError('Nonfinite observed TTCN value or timestamp')
+        present = valid.any(1)
+        if self.execution == 'full':
+            # Official-style scheduling: encode all B*C*K patches in one call,
+            # without TTCN gradient checkpointing. Keep the existing safe mask
+            # handling and broadcast aggregation, including empty patches.
+            tokens = self._encode_points(v, t, valid)
+            return tokens.reshape(b, c, k, self.dim), present.reshape(b, c, k)
         # Hour-long DIST patches can contain thousands of points. Recompute
         # small patch groups during backward instead of retaining all filters.
         encoded = []
@@ -49,7 +59,6 @@ class TTCNPatchEncoder(nn.Module):
             else:
                 encoded.append(self._encode_points(*arguments))
         tokens = torch.cat(encoded, 0)
-        present = valid.any(1)
         return tokens.reshape(b, c, k, self.dim), present.reshape(b, c, k)
 
     def _encode_points(self, v, t, valid):

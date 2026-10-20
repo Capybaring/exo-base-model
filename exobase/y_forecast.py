@@ -53,8 +53,8 @@ class YForecast(nn.Module):
         if c.patch_encoder != expected:
             raise ValueError(f'{c.variant} requires patch_encoder={expected}')
         d, p = c.d_model, c.d_model-1
-        encoder = MeanPatchEncoder if c.variant == 'y-base' else TTCNPatchEncoder
-        self.y_encoder = encoder(d, c.te_dim)
+        self.y_encoder = (MeanPatchEncoder(d, c.te_dim) if c.variant == 'y-base'
+                          else TTCNPatchEncoder(d, c.te_dim, execution=c.ttcn_execution))
         self.position = PositionalEmbedding(d, max_len=max(5000, c.history_patches))
         layer = nn.TransformerEncoderLayer(d, c.n_heads, 4*d, c.dropout,
             activation='gelu', batch_first=True)
@@ -70,7 +70,7 @@ class YForecast(nn.Module):
             if min(c.exog_dim, c.leader_num, c.state_num) < 1:
                 raise ValueError('LIFT dimensions must be positive')
             validate_lead_settings(c)
-            self.x_encoder = TTCNPatchEncoder(d, c.te_dim)
+            self.x_encoder = TTCNPatchEncoder(d, c.te_dim, execution=c.ttcn_execution)
             self.x_to_y = nn.Linear(p, p, bias=False)
             self.refiner = TokenLeadRefiner(c.history_patches, c.future_patches,
                 c.target_dim, min(c.leader_num, c.exog_dim), p, c.state_num,

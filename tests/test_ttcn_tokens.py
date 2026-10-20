@@ -13,14 +13,15 @@ from exobase.token_lift import estimate_token_leads, align_token_exogenous, Toke
 from exobase.lags import ExogenousLeadRefiner
 
 
-def test_ttcn_matches_official_nonempty_patch_formula_and_gradients():
+@pytest.mark.parametrize('execution', ['chunked', 'full'])
+def test_ttcn_matches_official_nonempty_patch_formula_and_gradients(execution):
     source = ast.parse(Path('upstream/tpatchgnn/tPatchGNN/model/tPatchGNN.py').read_text())
     cls = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == 'tPatchGNN')
     nodes = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in ('TTCN', 'LearnableTE')]
     env = {'torch': torch, 'F': F}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), '<official TTCN>', 'exec'), env)
     torch.manual_seed(19)
-    encoder = TTCNPatchEncoder(8, 4).train()
+    encoder = TTCNPatchEncoder(8, 4, execution=execution).train()
     values = torch.randn(2, 3, 5, 2)
     times = torch.rand_like(values)
     mask = torch.rand_like(values) > .3
@@ -35,8 +36,63 @@ def test_ttcn_matches_official_nonempty_patch_formula_and_gradients():
     expected = env['TTCN'](stub, features, m.float()).reshape(2, 2, 3, 7)
     torch.testing.assert_close(actual[..., :-1], expected)
     assert valid.all() and actual[..., -1].eq(1).all()
+    parameters = tuple(encoder.parameters())
+    official_grads = torch.autograd.grad(expected.square().sum(), parameters, retain_graph=True)
+    actual_grads = torch.autograd.grad(actual[..., :-1].square().sum(), parameters, retain_graph=True)
+    for actual_grad, official_grad in zip(actual_grads, official_grads):
+        torch.testing.assert_close(actual_grad, official_grad)
     actual.square().sum().backward()
     assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in encoder.parameters())
+
+
+@pytest.mark.parametrize('points', [1, 7, 40])
+@pytest.mark.parametrize('training', [False, True])
+def test_full_ttcn_matches_chunked_with_empty_patches_padding_and_input_gradients(points, training):
+    torch.manual_seed(211)
+    chunked = TTCNPatchEncoder(8, 4).train(training)
+    full = TTCNPatchEncoder(8, 4, execution='full').train(training)
+    full.load_state_dict(chunked.state_dict())
+    mask = torch.rand(2, 17, points, 3) > .3
+    mask[:, 2:4] = False
+    mask[:, :, -1] = False  # trailing padding, including all-empty P=1
+    values = torch.randn(mask.shape).masked_fill(~mask, float('nan'))
+    times = torch.rand(mask.shape).masked_fill(~mask, float('nan'))
+    inputs = [(values.clone().requires_grad_(), times.clone().requires_grad_()) for _ in range(2)]
+    outputs = [module(v, t, mask) for module, (v, t) in zip((chunked, full), inputs)]
+    torch.testing.assert_close(outputs[0][0], outputs[1][0])
+    assert torch.equal(outputs[0][1], outputs[1][1])
+    for output in outputs:
+        output[0].square().sum().backward()
+    for a, b in zip(chunked.parameters(), full.parameters()):
+        torch.testing.assert_close(a.grad, b.grad, atol=2e-6, rtol=2e-5)
+    for a, b in zip(inputs[0], inputs[1]):
+        torch.testing.assert_close(a.grad, b.grad, atol=2e-6, rtol=2e-5)
+        assert torch.isfinite(b.grad).all()
+
+
+@pytest.mark.parametrize('variant', ['patch-base', 'patch-lift', 'dag'])
+def test_full_execution_preserves_model_predictions_gradients_and_checkpoint_config(variant):
+    from dataclasses import asdict
+    torch.manual_seed(119)
+    settings = config(variant)
+    chunked = build_model(settings).train()
+    saved = asdict(settings)
+    saved['ttcn_execution'] = 'full'
+    full = build_model(ModelConfig.from_saved(saved)).train()
+    full.load_state_dict(chunked.state_dict())
+    before, aux = chunked(token_batch())
+    after, full_aux = full(token_batch())
+    torch.testing.assert_close(after, before)
+    torch.testing.assert_close(full_aux, aux)
+    (before.square().mean()+aux).backward()
+    (after.square().mean()+full_aux).backward()
+    for (name, a), (_, b) in zip(chunked.named_parameters(), full.named_parameters()):
+        assert (a.grad is None) == (b.grad is None), name
+        if a.grad is not None:
+            torch.testing.assert_close(a.grad, b.grad, atol=2e-6, rtol=2e-5, msg=name)
+    assert ModelConfig.from_saved(saved).ttcn_execution == 'full'
+    saved.pop('ttcn_execution')
+    assert ModelConfig.from_saved(saved).ttcn_execution == 'chunked'
 
 
 def test_ttcn_preserves_distribution_time_and_ignores_padding_and_point_order():

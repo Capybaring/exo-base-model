@@ -60,6 +60,26 @@ python -u scripts/run_all.py --datasets DIST BE NP --protocol uniform \
 
 默认 100 epochs 上限、patience=10、d_model=64，batch size 来自预设；可统一覆盖。beta 对 v4 自动设为 0，仅在旧 DAG 生效。FFT/global 默认保留，标量摘要只用于新 lag 或 y-base；patch-base/patch-lift 主路径必须使用 TTCN。
 
+## TTCN 批量计算试验
+
+`--ttcn-execution full` 把同一次编码的全部“样本×变量×patch”单元合并计算，不使用 TTCN 内部的 16 单元循环或梯度检查点。这遵循官方 TTCN 的批量执行方式；继续使用本仓库的安全缺失处理、广播聚合和全空 patch 处理，并非替换为整套官方 t-PatchGNN。实际时间点解码的分块/检查点不变。公式、参数、观测、窗口、划分、损失和 batch size 均不因此改变。
+
+默认 `chunked` 完整保留此前 16 单元分块与重计算方式，旧 checkpoint 缺少该设置时也使用 `chunked`。运行设置记录在 manifest 的 args/model_config 中，重载时自动恢复，不改变 state_dict 参数键。支持 patch-base、patch-lift 和采用 TTCN 的 DAG 变体；不适用于 y-base/mean。
+
+```bash
+# 在原 batch size=64 下试跑 3 轮，比较每轮 seconds；每次创建新结果目录
+python -u scripts/run_all.py --datasets DIST --protocol dataset-short \
+  --variants patch-lift --ttcn-execution full --batch-size 64 \
+  --device cuda:0 --epochs 3 --patience 3
+
+# 同一设置的原执行方式对照
+python -u scripts/run_all.py --datasets DIST --protocol dataset-short \
+  --variants patch-lift --ttcn-execution chunked --batch-size 64 \
+  --device cuda:0 --epochs 3 --patience 3
+```
+
+full 保留更多反向传播中间结果，显存需求较高。若发生 CUDA OOM，显式降低 batch size，并在两种执行方式下使用相同的新 batch size 对照；不自动回退或更改任务。GPU 加速幅度需实测，参数量不会反映执行开销。确认资源和耗时后，可改为 `--epochs 100 --patience 10` 正式训练；3 轮仅用于运行效率检查。
+
 ## 检查和输出
 
 ```bash

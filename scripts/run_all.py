@@ -51,6 +51,7 @@ def parser():
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--threads', type=int, default=2)
     p.add_argument('--patch-encoder', choices=['ttcn', 'mean'], default='ttcn')
+    p.add_argument('--ttcn-execution', choices=['chunked', 'full'], default='chunked')
     p.add_argument('--lag-estimator', choices=['fft', 'pearson'], default='fft')
     p.add_argument('--refiner-mode', choices=['global', 'prefix'], default='global')
     for name in OVERRIDES:
@@ -81,6 +82,8 @@ def selections(args):
         variants = [without[variants[0]]]
     if len(datasets) != len(set(datasets)) or len(variants) != len(set(variants)):
         raise ValueError('Duplicate datasets/variants would overwrite a job; remove duplicates')
+    if args.ttcn_execution == 'full' and ('y-base' in variants or args.patch_encoder != 'ttcn'):
+        raise ValueError('--ttcn-execution full requires TTCN patch/DAG variants')
     return datasets, variants
 
 
@@ -169,6 +172,7 @@ def build_jobs(root, args, plans, variants, output):
             command = [sys.executable, '-u', '-m', 'exobase.train',
                 '--config', plan['config'], '--data-path', plan['data_path'],
                 '--variant', variant, '--patch-encoder', 'mean' if variant == 'y-base' else args.patch_encoder,
+                '--ttcn-execution', args.ttcn_execution,
                 '--task-protocol', args.protocol,
                 '--lag-estimator', args.lag_estimator, '--refiner-mode', args.refiner_mode,
                 '--split', 'chronological', '--normalization', 'train',

@@ -71,7 +71,7 @@ class DAGTokenForecast(nn.Module):
         if not 0 <= c.alpha <= 1 or c.beta < 0 or not 0 <= c.dropout < 1:
             raise ValueError('Invalid mixture, auxiliary weight or dropout')
         d, p, length, horizon = c.d_model, c.d_model-1, c.history_patches, c.future_patches
-        self.patch_encoder = TTCNPatchEncoder(d, c.te_dim)
+        self.patch_encoder = TTCNPatchEncoder(d, c.te_dim, execution=c.ttcn_execution)
         self.decoder = QueryDecoder(d, c.te_dim)
         self.position = PositionalEmbedding(d)
         self.temporal_x = encoder(c, True)

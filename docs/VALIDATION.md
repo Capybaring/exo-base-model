@@ -1,5 +1,9 @@
 # 验证记录
 
+2026-10-20 TTCN 批量执行选项：全套测试 118 项通过。新增 `--ttcn-execution full`，按官方 TTCN 调度把一次编码的 B×C×K 单元一起计算，取消 TTCN 内部的 16 单元循环与梯度重计算；保留安全掩码/空 patch 和广播聚合，实际查询解码不变。默认 chunked 和旧 checkpoint 行为保留。测试核对官方非空 TTCN 的输出及参数梯度，两模式在缺失、隐藏 NaN、全空、padding 下的输出/输入梯度/参数梯度，以及 patch-base/patch-lift/dag 的整模型预测、辅助项、梯度、配置保存重载。新增批量入口训练/评估/滞后导出及不兼容参数检查。
+
+真实 DIST 短任务以 d_model=64、batch=2、8 条记录、1 epoch、CPU 跑通 full 训练、验证、测试和滞后导出。另取真实 DIST 前两条训练记录，在相同权重、dropout=0、2 CPU 线程下比较前向+反向：预热 1 次后 3 次中位耗时，chunked 0.5613s，full 0.2987s，约 1.88 倍；最大预测差 2.24e-7，两模式损失均为 0.50291419。只证明这批数据的 CPU 计算结果，不代表完整 epoch、CUDA 提速或精度提升。数据整理、窗口、原始观测、切分、归一化、损失、LIFT 方程和 upstream 文件未改；full 更占显存，需要服务器实测。用法见 [批量运行](BATCH_RUNS.md#ttcn-批量计算试验)。
+
 2026-10-20 预测任务协议：全套测试 107 项通过。默认 dataset-short 按预设读取实际时间，BE/NP 为 168h→24h，DIST 为 2h→30min/60s patch；保留显式 uniform 旧 24→24，新增 dataset-long 的论文长期窗长。测试覆盖单位换算、日/半小时数据、禁止隐式覆盖、长任务与输出元数据。13 份真实数据的短任务预检查生成 26 条 patch-lift/dag 命令；BE/NP 长任务的 4 条命令预检查通过。DIST 的两种模型以 d_model=64、8 条记录、1 epoch、CPU 完成训练管线验证，不作为精度结果。本次仅对齐窗长和任务记录，不改 TTCN、原始数据、缺失、记录切分或损失，也不声称完整复现论文的 TFB 滚动评估。见 [预测任务标准](FORECAST_TASKS.md)。
 
 2026-10-19 架构 v4：全套 `python -m pytest -q` 共 100 项通过。新增 Y-only/patch/LIFT 的输入隔离、相同 Y 初始化、X/Y 参数独立、主损失到 X 编码器/映射/未来 X 的梯度、标量 lag 与编码器/时间特征隔离、空历史/常量/隐藏 NaN、防未来 Y 泄漏、prefix 对齐、完整训练/重载/预测与 lag 导出检查。13 份真实数据完成 24→24 步预检查，生成 52 条 y-base/patch-base/patch-lift/dag 命令；BE 与 DIST 的四种模型共 8 个任务完成八记录/小模型/一轮训练管线检查。TTCN 聚合、data.py、原 DAG 主干、FilterFactory/ComplexLinear 和 upstream 参照保持不变。未执行完整精度训练或 CUDA 验证，不声称效果提升。结构与比较边界见 [v4](Y_BASE_V4.md)。

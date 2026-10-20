@@ -41,6 +41,8 @@ class ModelConfig:
     # Missing from v2 checkpoint configs: retain their scalar-mean architecture.
     # New training explicitly selects ttcn in train.py.
     patch_encoder: str = 'mean'
+    # Execution scheduling only; absent from older checkpoints -> old behavior.
+    ttcn_execution: str = 'chunked'
 
     @classmethod
     def from_saved(cls, settings):

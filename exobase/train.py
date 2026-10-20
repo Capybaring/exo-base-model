@@ -37,6 +37,8 @@ def parser():
         help='patch-lift -> patch-base; legacy dag-lift -> dag-history')
     p.add_argument('--patch-encoder', choices=['ttcn', 'mean'], default='ttcn',
         help='Full TTCN tokens; y-base always uses fixed-bin means; legacy DAG also supports mean')
+    p.add_argument('--ttcn-execution', choices=['chunked', 'full'], default='chunked',
+        help='chunked: existing 16-patch/checkpoint path; full: all patches in one TTCN call, higher memory')
     p.add_argument('--split', choices=['official-random', 'chronological'], default='chronological')
     p.add_argument('--normalization', choices=['seen', 'train'], default='train')
     p.add_argument('--batch-size', type=int, default=2)
@@ -102,6 +104,9 @@ def main(argv=None):
             args.patch_encoder = 'mean'
         elif args.patch_encoder != 'ttcn':
             p.error('patch-base/patch-lift require --patch-encoder ttcn')
+    if args.ttcn_execution == 'full' and (args.patch_encoder != 'ttcn' or
+            args.variant not in ('patch-base', 'patch-lift', 'dag', 'dag-history', 'dag-lift')):
+        p.error('--ttcn-execution full requires a TTCN patch-base/patch-lift/DAG variant')
     if not args.data_path:
         p.error('--data-path or a preset containing data_path is required')
     if min(args.epochs, args.patience, args.batch_size, args.threads) < 1 or args.lr <= 0:
@@ -157,7 +162,7 @@ def main(argv=None):
         beta=args.beta, dropout=args.dropout, max_lag=args.max_lag, min_pairs=args.min_pairs,
         min_correlation=args.min_correlation, leader_num=args.leader_num,
         state_num=args.state_num, refiner_mode=args.refiner_mode, patch_encoder=args.patch_encoder,
-        lag_estimator=args.lag_estimator)
+        lag_estimator=args.lag_estimator, ttcn_execution=args.ttcn_execution)
     patterns, pattern_info = None, None
     if args.variant == 'delay':
         from .patterns import fit_pattern_bank
@@ -244,6 +249,8 @@ def main(argv=None):
     (output/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     print('Variant:', args.variant, 'records:', {k: len(v) for k, v in splits.items()},
           'parameters:', sum(x.numel() for x in model.parameters()), flush=True)
+    if args.patch_encoder == 'ttcn':
+        print('TTCN execution:', args.ttcn_execution, flush=True)
     print('Evaluation: train-only Z-score, observed targets, variable macro; '
           'training objective: '+('future-Y MinMax MSE only' if simple else 'MinMax MSE + auxiliary'), flush=True)
     best, best_epoch, best_state, stale, history = float('inf'), 0, None, 0, []
@@ -260,7 +267,7 @@ def main(argv=None):
             if not torch.isfinite(total):
                 raise ValueError('Nonfinite training loss')
             total.backward(); optimizer.step(); steps += 1
-            if index == 0 or (index+1) % 50 == 0:
+            if index == 0 or (index+1) % 50 == 0 or index+1 == len(loaders['train']):
                 print(f'Epoch {epoch+1} batch {index+1}/{len(loaders["train"])} '
                       f'train_minmax_mse={float(loss.detach()):.6f} '
                       f'auxiliary={float(auxiliary.detach()):.6f} '

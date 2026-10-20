@@ -191,6 +191,25 @@ def test_cli_can_run_outside_repository(tmp_path):
     assert result.returncode == 0 and '--no-lift' in result.stdout
 
 
+def test_full_ttcn_execution_smoke_reload_and_incompatible_variants(tmp_path):
+    data = prepared_be(tmp_path)
+    output = tmp_path/'full'
+    assert runner.main(['--datasets','BE','--data-dir',str(data),'--device','cpu',
+        '--variants','patch-lift','--ttcn-execution','full','--smoke','--threads','1',
+        '--output-dir',str(output)]) == 0
+    folder = output/'BE'/'patch-lift'
+    manifest = json.loads((folder/'manifest.json').read_text())
+    assert manifest['args']['ttcn_execution'] == manifest['model_config']['ttcn_execution'] == 'full'
+    from exobase.evaluate import main as evaluate
+    result = evaluate(['--checkpoint',str(folder/'best_model.pt'),'--threads','1'])
+    original = json.loads((folder/'metrics.json').read_text())
+    assert result['test']['mse'] == pytest.approx(original['test']['mse'],rel=1e-6)
+    assert (folder/'test_lags.csv').exists()
+    with pytest.raises(SystemExit):
+        runner.main(['--datasets','BE','--data-dir',str(data),'--device','cpu',
+            '--variants','y-base','--ttcn-execution','full','--dry-run'])
+
+
 @pytest.mark.parametrize('name,history,forecast,patch',[
     ('BE',168*3600,24*3600,3600),('NP',168*3600,24*3600,3600),
     ('DIST',7200,1800,60),('Colbun',60*86400,10*86400,86400),
