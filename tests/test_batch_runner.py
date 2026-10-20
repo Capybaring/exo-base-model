@@ -2,6 +2,7 @@
 import csv
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -25,6 +26,33 @@ def prepared_be(tmp_path):
              names=np.array(['OT', ' Generation forecast', ' System load forecast']),
              duplicate_rows=np.array(0))
     return tmp_path
+
+
+def test_checkpoint_recreates_removed_directory_and_records_absolute_path(tmp_path, monkeypatch):
+    prepared_be(tmp_path)
+    import exobase.train as train
+    original_evaluate = train.evaluate_irregular
+    output = tmp_path/'removed_during_epoch'
+    removed = []
+
+    def evaluate_and_remove(*args, **kwargs):
+        metrics = original_evaluate(*args, **kwargs)
+        if not removed:
+            shutil.rmtree(output)
+            removed.append(True)
+        return metrics
+
+    monkeypatch.setattr(train, 'evaluate_irregular', evaluate_and_remove)
+    monkeypatch.chdir(tmp_path)
+    train.main(['--config', str(ROOT/'configs/BE.json'), '--data-path', str(tmp_path/'BE.npz'),
+                '--sample-stride', '43200', '--patch-seconds', '43200', '--patch-stride', '43200',
+                '--device', 'cpu', '--threads', '1', '--epochs', '1', '--max-records', '8',
+                '--d-model', '8', '--n-heads', '2', '--state-num', '2',
+                '--save-path', 'removed_during_epoch'])
+    assert removed and (output/'best_model.pt').exists()
+    saved = json.loads((output/'manifest.json').read_text())
+    assert saved['args']['save_path'] == str(output.resolve())
+    assert (output/'metrics.json').exists() and (output/'test_lags.csv').exists()
 
 
 def test_inventory_windows_and_matched_ablation_commands(tmp_path):

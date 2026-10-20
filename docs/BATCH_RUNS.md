@@ -1,5 +1,20 @@
 # 全部数据、base/patch/LIFT 与 DAG 对照
 
+## 一次执行 NP 和 BE 的 patch-lift（12h 样本滑动）
+
+激活训练环境并进入仓库根目录后：
+
+```bash
+git pull --ff-only origin master
+bash scripts/run_np_be_patch_lift.sh
+```
+
+脚本先跑 NP，成功后自动跑 BE。两者固定 history=168h、forecast=24h、patch 宽度/步长=12h、sample stride=12h、batch=64、epochs=100、patience=10、seed=1、FFT/global、chronological/train-only scaling；TTCN 默认 chunked 不变。默认使用当前环境的 `python`、`cuda:0` 和 2 CPU 线程；可用 `PYTHON_BIN=/absolute/path/to/python DEVICE=cuda:1 bash scripts/run_np_be_patch_lift.sh` 显式指定解释器/设备。任一任务失败时脚本停止，不并行占用同一 GPU。
+
+当前数据各有训练/验证/测试 2605/873/873 个窗口，每轮训练 41 个 batch。模型和损失均不改。结果使用绝对路径、单独的数据集目录，保存在 `results/rolling_12h_patch12h/run_<时间>_<进程号>/{NP,BE}/patch-lift/`，避免两次训练覆盖。
+
+手动粘贴多行命令时，中间每一行都必须有续行符，例如 `--sample-stride 43200 \`；漏写会使后续 `--batch-size`、`--save-path` 等成为另一条 shell 命令，而训练进程使用配置默认值。启动日志 `Saving results to:` 显示实际保存位置；训练入口将其固定为绝对路径，并在写入最佳权重前重新确保父目录存在。
+
 从仓库根目录执行，三条训练命令按需要选择：
 
 ```bash

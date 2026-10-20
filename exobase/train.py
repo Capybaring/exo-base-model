@@ -127,10 +127,12 @@ def main(argv=None):
     if args.variant == 'delay' and (args.patch_stride != args.patch_seconds
             or not math.isclose(args.history/args.patch_seconds, round(args.history/args.patch_seconds))):
         p.error('Patch-level DFT baseline requires nonoverlapping patches and an aligned history boundary')
-    output = Path(args.save_path)
+    output = Path(args.save_path).expanduser().resolve()
+    args.save_path = str(output)
     if not args.overwrite and (output/'best_model.pt').exists():
         p.error('Checkpoint exists; choose a new --save-path or explicitly use --overwrite')
     output.mkdir(parents=True, exist_ok=True)
+    print('Saving results to:', output, flush=True)
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
@@ -288,6 +290,9 @@ def main(argv=None):
         if val['mse'] < best:
             best, best_epoch, stale = val['mse'], epoch+1, 0
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            # Recreate the parent if it was removed while a long epoch was running.
+            output.mkdir(parents=True, exist_ok=True)
+            (output/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
             torch.save({'state_dict': best_state, 'manifest': manifest, 'best_epoch': best_epoch,
                 'best_validation_mse': best}, output/'best_model.pt')
         else:

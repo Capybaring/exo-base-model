@@ -31,6 +31,8 @@ DIST 保留原有不规则性、不额外丢弃；BE/NP 逐变量独立随机丢
 
 ## Base、patch 与 LIFT 实验
 
+BE/NP 使用 12h patch、12h 样本滑动、168h→24h、batch=64 连续训练：在已激活的训练环境中执行 `bash scripts/run_np_be_patch_lift.sh`，NP 成功后自动运行 BE。结果按数据集保存到新的绝对路径。详细参数见 [批量运行](docs/BATCH_RUNS.md)。
+
 ```bash
 git pull --ff-only origin master
 
