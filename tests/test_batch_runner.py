@@ -17,7 +17,7 @@ spec.loader.exec_module(runner)
 
 def prepared_be(tmp_path):
     generator = np.random.default_rng(51)
-    hours = np.arange(481, dtype=np.float64)
+    hours = np.arange(1921, dtype=np.float64)
     x = generator.normal(size=(len(hours), 2)).astype(np.float32)
     values = np.column_stack([np.roll(x[:, 0], 3), x]).astype(np.float32)
     mask = generator.random(values.shape) > .1
@@ -68,7 +68,8 @@ def test_dry_run_preflight_and_no_outputs(tmp_path, capsys):
     assert runner.main(['--datasets', 'BE', '--data-dir', str(data), '--device', 'cpu',
         '--variants', 'dag-lift', 'dag-history', '--dry-run', '--output-dir', str(output)]) == 0
     text = capsys.readouterr().out
-    assert '--history 86400' in text and '--forecast 86400' in text
+    assert '--history 604800' in text and '--forecast 86400' in text
+    assert '--task-protocol dataset-short' in text
     assert '--variant dag-history' in text and '--variant dag-lift' in text
     assert not output.exists()
     with pytest.raises(SystemExit):
@@ -78,7 +79,7 @@ def test_dry_run_preflight_and_no_outputs(tmp_path, capsys):
 
 def test_no_lift_does_not_require_fft_history_length(tmp_path):
     prepared_be(tmp_path)
-    flags = ['--datasets', 'BE', '--data-dir', str(tmp_path), '--history-steps', '2',
+    flags = ['--datasets', 'BE', '--data-dir', str(tmp_path), '--protocol', 'uniform', '--history-steps', '2',
              '--dry-run', '--device', 'cpu']
     assert runner.main(flags+['--no-lift']) == 0
     with pytest.raises(SystemExit):
@@ -145,6 +146,10 @@ def test_simple_three_variant_training_reload_and_component_comparison(tmp_path)
         assert m['record_ids']==manifests[0]['record_ids']
         assert m['normalization']==manifests[0]['normalization']
         assert m['patch_protocol']['auxiliary_targets'] is None
+        assert m['args']['history']==168*3600 and m['args']['forecast']==24*3600
+        assert m['forecast_task']['protocol']=='dataset-short'
+        assert m['forecast_task']['window_alignment_only']
+    assert rows[0]['protocol']=='dataset-short' and int(rows[0]['history_steps'])==168
     assert manifests[0]['args']['patch_encoder']=='mean'
     assert not manifests[1]['known_future_x'] and manifests[2]['known_future_x']
     assert not manifests[2]['lag_protocol']['leader_stream_detached']
@@ -184,3 +189,42 @@ def test_cli_can_run_outside_repository(tmp_path):
     result = subprocess.run([sys.executable, str(ROOT/'scripts/run_all.py'), '--help'],
                             cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0 and '--no-lift' in result.stdout
+
+
+@pytest.mark.parametrize('name,history,forecast,patch',[
+    ('BE',168*3600,24*3600,3600),('NP',168*3600,24*3600,3600),
+    ('DIST',7200,1800,60),('Colbun',60*86400,10*86400,86400),
+    ('Sdwpfm1',168*1800,24*1800,1800)])
+def test_dataset_short_durations_and_units(name,history,forecast,patch):
+    args=runner.parser().parse_args([])
+    _,_,task=runner.task_settings(ROOT,args,name)
+    assert (task['history_seconds'],task['forecast_seconds'],task['step_seconds'])==(history,forecast,patch)
+    assert task['history_steps']==history//patch and task['forecast_steps']==forecast//patch
+
+
+def test_long_windows_and_dist_has_no_paper_long_preset():
+    args=runner.parser().parse_args(['--protocol','dataset-long'])
+    for name,history,forecast,patch in [('BE',720*3600,360*3600,3600),
+                                      ('NP',720*3600,360*3600,3600),
+                                      ('Colbun',180*86400,30*86400,86400)]:
+        path,_,task=runner.task_settings(ROOT,args,name)
+        assert path.name==name+'_long.json'
+        assert (task['history_seconds'],task['forecast_seconds'],task['step_seconds'])==(history,forecast,patch)
+    with pytest.raises(ValueError,match='DIST is not in DAG'):
+        runner.task_settings(ROOT,args,'DIST')
+
+
+def test_uniform_preserves_old_task_and_dataset_overrides_are_explicit(tmp_path,capsys):
+    args=runner.parser().parse_args(['--protocol','uniform'])
+    for name in ['DIST','BE','NP']:
+        _,_,task=runner.task_settings(ROOT,args,name)
+        assert task['history_seconds']==86400 and task['forecast_seconds']==86400
+        assert task['step_seconds']==3600 and task['protocol']=='uniform'
+    for protocol in ['dataset-short','dataset-long']:
+        args=runner.parser().parse_args(['--protocol',protocol,'--history-steps','24'])
+        with pytest.raises(ValueError,match='require --protocol uniform'):
+            runner.task_settings(ROOT,args,'BE')
+    data=prepared_be(tmp_path)
+    assert runner.main(['--datasets','BE','--data-dir',str(data),'--protocol','uniform',
+                        '--variants','dag','--dry-run','--device','cpu'])==0
+    assert '--history 86400' in capsys.readouterr().out

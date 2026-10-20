@@ -34,11 +34,11 @@ DIST 保留原有不规则性、不额外丢弃；BE/NP 逐变量独立随机丢
 ```bash
 git pull --ff-only origin master
 
-# 全部 13 个数据集，依次独立训练三种结构，默认 24→24 原生步
+# 全部数据，使用各自短期任务；两种模型都读取已知未来 X
 python -u scripts/run_all.py --device cuda:0 \
-  --variants y-base patch-base patch-lift
+  --protocol dataset-short --variants patch-lift dag
 
-# 后续与已有 patch+DAG 比较
+# 也可只运行原 patch+DAG
 python -u scripts/run_all.py --device cuda:0 --variants dag
 ```
 
@@ -55,20 +55,21 @@ python -u scripts/run_all.py --device cuda:0 --variants dag
 
 `--no-lift` 默认选择 patch-base；显式 `--variant dag-lift --no-lift` 仍选择旧 dag-history。原来的 DAG 及旧 checkpoint 保留，见 [v3 文档](docs/TTCN_V3.md)、[LIFT 官方对齐记录](docs/LIFT_OFFICIAL.md)。旧 tpatch-y/tpatch/exo/delay 变体需显式指定。
 
-批量默认 DIST + 12 份 Table-3 数据。`--datasets BE NP PJM` 选子集，`--suite table3` 排除 DIST，`--data-dir /path/to/npz` 指定含 DATASET.npz 的目录。24 步对小时数据为 24 小时、半小时数据为 12 小时、日数据为 24 天；DIST 批量协议使用 1 小时 patch。
+批量默认 DIST + 12 份 TSF-X 数据。`--datasets BE NP PJM` 选子集，`--suite table3` 排除 DIST，`--data-dir /path/to/npz` 指定含 DATASET.npz 的目录。现在默认读取各数据集短期预设，不再统一覆盖为 24→24：BE/NP 为 168 小时→24 小时；DIST 为 2 小时→30 分钟、1 分钟 patch；日数据为 60 天→10 天。详见 [预测任务标准](docs/FORECAST_TASKS.md)。`table3` 是原数据包目录名称，不表示推荐论文中不使用未来 X 的 Table 3 实验。
+
+历史 Y-only 的 y-base/patch-base 仅作为参考模型；主要机制比较保持已知未来外生输入，不把去掉未来 X 作为必要消融。
 
 ```bash
 # 小规模检查，不作正式精度结果
 python -u scripts/run_all.py --datasets BE --device cpu \
   --variants y-base patch-base patch-lift --smoke
 
-# BE 单数据集 24 小时→24 小时 patch+LIFT
+# BE 单数据集的 DAG 窗长对齐任务：168 小时→24 小时
 python -u -m exobase.train --config configs/BE.json --variant patch-lift \
-  --history 86400 --forecast 86400 --patch-seconds 3600 --patch-stride 3600 \
-  --save-path results/BE/patch-lift-24to24
+  --save-path results/BE/patch-lift-168to24
 ```
 
-单数据集 JSON 保留各自时长（例如 configs/BE.json 为 168→24 小时），命令行覆盖 JSON。正式 24→24 对照优先使用批量入口。
+单数据集和批量入口现在采用一致的 JSON 窗长。旧 24→24 任务可显式用 `--protocol uniform` 重跑，不能混入新任务的指标表。长任务用 `--protocol dataset-long --suite table3`，BE/NP 为 720→360 小时。这里只对齐论文窗长；现有不规则缺失、60/20/20、独立记录和 MinMax MSE 协议保留，并非论文的完整 TFB 重现。
 
 ## Lag 与特征修正
 
@@ -90,12 +91,12 @@ v4 三个变体只优化**未来 Y 有效查询点的 MinMax masked variable-mac
 
 ```bash
 python -m exobase.predict \
-  --checkpoint results/BE/patch-lift-24to24/best_model.pt \
-  --output results/BE/patch-lift-24to24/test_predictions.csv \
-  --lag-output results/BE/patch-lift-24to24/reloaded_lags.csv
+  --checkpoint results/BE/patch-lift-168to24/best_model.pt \
+  --output results/BE/patch-lift-168to24/test_predictions.csv \
+  --lag-output results/BE/patch-lift-168to24/reloaded_lags.csv
 
 python -m exobase.evaluate \
-  --checkpoint results/BE/patch-lift-24to24/best_model.pt
+  --checkpoint results/BE/patch-lift-168to24/best_model.pt
 ```
 
 按 checkpoint 保存配置构建模型，校验数据 SHA256 与划分；旧权重保持旧架构。新结构需要重新训练，功能验证不代表精度提高。见 [验证记录](docs/VALIDATION.md)、[来源](docs/PROVENANCE.md)。

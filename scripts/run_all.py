@@ -6,8 +6,9 @@ Examples (from the repository root):
   python -u scripts/run_all.py --device cuda:0 --no-lift
   python -u scripts/run_all.py --device cuda:0 --variants y-base patch-base patch-lift
 
-Default: 24 -> 24 native steps; DIST uses one-hour patches. No model, patch
-encoder, source data, or preset file is modified by this runner.
+Default: dataset-short presets (BE/NP 168h->24h; DIST 2h->30min).
+The uniform profile explicitly retains the old 24->24 native-step protocol.
+Window alignment does not reproduce DAG's split/rolling/loss protocol.
 """
 import argparse
 import csv
@@ -43,8 +44,10 @@ def parser():
     p.add_argument('--device', default='cuda' if _cuda_available() else 'cpu')
     p.add_argument('--data-dir', type=Path, help='Optional flat directory containing DATASET.npz')
     p.add_argument('--output-dir', type=Path, help='New output directory; default is unique')
-    p.add_argument('--history-steps', type=int, default=24)
-    p.add_argument('--forecast-steps', type=int, default=24)
+    p.add_argument('--protocol', choices=['dataset-short', 'dataset-long', 'uniform'],
+                   default='dataset-short', help='Use dataset-specific windows; uniform explicitly retains old 24->24')
+    p.add_argument('--history-steps', type=int, help='uniform only; default 24 native steps')
+    p.add_argument('--forecast-steps', type=int, help='uniform only; default 24 native steps')
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--threads', type=int, default=2)
     p.add_argument('--patch-encoder', choices=['ttcn', 'mean'], default='ttcn')
@@ -81,6 +84,36 @@ def selections(args):
     return datasets, variants
 
 
+def task_settings(root, args, name):
+    """Resolve physical durations before inspecting data or constructing jobs."""
+    if args.protocol != 'uniform' and (args.history_steps is not None or args.forecast_steps is not None):
+        raise ValueError('Step overrides require --protocol uniform; dataset protocols read their JSON windows')
+    if args.protocol == 'dataset-long':
+        if name == 'DIST':
+            raise ValueError('DIST is not in DAG; no paper long-term preset. Use dataset-short or explicitly use uniform')
+        config_path = root/'configs/table3_irregular'/f'{name}_long.json'
+    else:
+        folder = 'configs' if name in ('DIST', 'BE', 'NP') else 'configs/table3_irregular'
+        config_path = root/folder/f'{name}.json'
+    config = json.loads(config_path.read_text())
+    if args.protocol == 'uniform':
+        patch = STEPS[name]
+        history = (args.history_steps if args.history_steps is not None else 24)*patch
+        forecast = (args.forecast_steps if args.forecast_steps is not None else 24)*patch
+    else:
+        history, forecast, patch = (config[k] for k in ('history', 'forecast', 'patch_seconds'))
+    if (min(history, forecast, patch) <= 0 or history % patch or forecast % patch):
+        raise ValueError('Preset durations must be positive whole patch multiples')
+    return config_path, config, {
+        'protocol': args.protocol, 'step_seconds': patch,
+        'history_steps': int(history//patch), 'forecast_steps': int(forecast//patch),
+        'history_seconds': history, 'forecast_seconds': forecast,
+        'task_id': f'{name}_h{history:g}_f{forecast:g}_p{patch:g}',
+        'task_reference': ('explicit uniform window; not DAG paper protocol' if args.protocol == 'uniform'
+            else 'custom DIST initial industrial task; not in DAG paper' if name == 'DIST'
+            else 'DAG v3 short/long window lengths only; irregular evaluation retained')}
+
+
 def preflight(root, args, datasets):
     import numpy as np
     from exobase.data import load_long_table, TimeRecords, split_records, normalization_from_seen
@@ -89,24 +122,22 @@ def preflight(root, args, datasets):
     plans, errors = [], []
     for name in datasets:
         try:
-            folder = 'configs' if name in ('DIST', 'BE', 'NP') else 'configs/table3_irregular'
-            config_path = root/folder/f'{name}.json'
-            config = json.loads(config_path.read_text())
+            config_path, config, task = task_settings(root, args, name)
             source = (resolve(root, args.data_dir)/f'{name}.npz' if args.data_dir else
                       resolve(root, Path(config['data_path'])))
             if not args.data_dir and not source.exists() and name in ('BE', 'NP'):
                 source = root/'data/processed/table3_irregular'/f'{name}.npz'
             table = load_long_table(source, config['targets'], config['exog'])
             gaps = np.diff(table.time)
-            step = STEPS[name]
+            native_step = STEPS[name]
             if not len(gaps) or not np.isfinite(table.time).all() or (gaps <= 0).any():
                 raise ValueError('timestamps must be finite and strictly increasing')
             if name != 'DIST':
                 unique, counts = np.unique(gaps, return_counts=True)
-                if (not np.isclose(unique[counts.argmax()], step) or
-                        not np.allclose(gaps/step, np.rint(gaps/step))):
-                    raise ValueError(f'expected native interval {step}s; check timestamp units')
-            history, forecast = args.history_steps*step, args.forecast_steps*step
+                if (not np.isclose(unique[counts.argmax()], native_step) or
+                        not np.allclose(gaps/native_step, np.rint(gaps/native_step))):
+                    raise ValueError(f'expected native interval {native_step}s; check timestamp units')
+            history, forecast = task['history_seconds'], task['forecast_seconds']
             records = TimeRecords(table, history, forecast, len(config['targets']))
             if args.smoke:
                 records.records = records.records[:8]
@@ -116,14 +147,14 @@ def preflight(root, args, datasets):
             normalization_from_seen(records, split['train'])
             fit_evaluation_statistics(records, split['train'])
             record_ids = {key: [records.records[i][0] for i in ids] for key, ids in split.items()}
-            plan = {'dataset': name, 'step_seconds': step, 'history_steps': args.history_steps,
-                    'forecast_steps': args.forecast_steps, 'history_seconds': history,
-                    'forecast_seconds': forecast, 'valid_records': len(records),
+            plan = {'dataset': name, **task, 'valid_records': len(records),
                     'record_ids': record_ids, 'split_records': {k: len(v) for k, v in split.items()},
                     'config': str(config_path), 'data_path': str(source), 'data_sha256': sha256(source)}
             plans.append(plan)
-            print(f'Checked {name}: {args.history_steps}->{args.forecast_steps} steps, '
-                  f'patch={step}s, records={len(records)}, split={plan["split_records"]}', flush=True)
+            print(f'Checked {name}: history={history}s forecast={forecast}s '
+                  f'({task["history_steps"]}->{task["forecast_steps"]} patches), '
+                  f'patch={task["step_seconds"]}s, protocol={args.protocol}, '
+                  f'records={len(records)}, split={plan["split_records"]}', flush=True)
         except (ValueError, OSError, KeyError) as error:
             errors.append(f'{name}: {error}')
     if errors:
@@ -138,6 +169,7 @@ def build_jobs(root, args, plans, variants, output):
             command = [sys.executable, '-u', '-m', 'exobase.train',
                 '--config', plan['config'], '--data-path', plan['data_path'],
                 '--variant', variant, '--patch-encoder', 'mean' if variant == 'y-base' else args.patch_encoder,
+                '--task-protocol', args.protocol,
                 '--lag-estimator', args.lag_estimator, '--refiner-mode', args.refiner_mode,
                 '--split', 'chronological', '--normalization', 'train',
                 '--history', str(plan['history_seconds']), '--forecast', str(plan['forecast_seconds']),
@@ -186,6 +218,7 @@ def result_row(plan, job, args, output):
                 'patch_stride': plan['step_seconds'],
                 'patch_encoder': 'mean' if job['variant'] == 'y-base' else args.patch_encoder,
                 'seed': args.seed, 'split': 'chronological', 'normalization': 'train',
+                'task_protocol': args.protocol,
                 'lag_estimator': args.lag_estimator, 'refiner_mode': args.refiner_mode}
     for key in OVERRIDES:
         if getattr(args, key) is not None:
@@ -240,7 +273,7 @@ def write_comparison(output, rows):
 def main(argv=None):
     p = parser()
     args = p.parse_args(argv)
-    if min(args.history_steps, args.forecast_steps, args.threads) < 1:
+    if any(v is not None and v < 1 for v in (args.history_steps, args.forecast_steps, args.threads)):
         p.error('history-steps, forecast-steps and threads must be positive')
     if args.smoke and args.epochs not in (None, 1):
         p.error('--smoke runs exactly one epoch')
@@ -254,16 +287,19 @@ def main(argv=None):
     root = args.root.resolve()
     try:
         datasets, variants = selections(args)
-        if {'dag-lift', 'patch-lift'} & set(variants) and args.lag_estimator == 'fft' and args.history_steps < 3:
-            raise ValueError('FFT local peaks need at least 3 history steps')
         if {'patch-base', 'patch-lift'} & set(variants) and args.patch_encoder != 'ttcn':
             raise ValueError('patch-base/patch-lift require --patch-encoder ttcn')
         plans = preflight(root, args, datasets)
+        if ({'dag-lift', 'patch-lift'} & set(variants) and args.lag_estimator == 'fft'
+                and any(plan['history_steps'] < 3 for plan in plans)):
+            raise ValueError('FFT local peaks need at least 3 history patch bins')
     except (ValueError, OSError, KeyError) as error:
         p.error(str(error))
     stamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%fZ')
+    group = (f'uniform_{args.history_steps or 24}to{args.forecast_steps or 24}'
+             if args.protocol == 'uniform' else args.protocol)
     output = (resolve(root, args.output_dir) if args.output_dir else
-              root/'results'/f'all_{args.history_steps}to{args.forecast_steps}'/
+              root/'results'/group/
               f'{"SMOKE" if args.smoke else "run"}_{stamp}')
     if output.exists() and not args.dry_run:
         p.error(f'Output already exists: {output}; choose a new directory')
@@ -275,10 +311,12 @@ def main(argv=None):
         return 0
     output.mkdir(parents=True)
     (output/'plan.json').write_text(json.dumps({'smoke_test': args.smoke, 'seed': args.seed,
+        'protocol': args.protocol, 'window_alignment_only': args.protocol != 'uniform',
         'datasets': plans, 'variants': variants, 'jobs': jobs}, ensure_ascii=False, indent=2))
     print(f'Running {len(jobs)} sequential jobs. Results: {output}', flush=True)
-    fields = ['dataset', 'variant', 'status', 'seed', 'history_steps', 'forecast_steps',
-              'step_seconds', 'mse', 'mae', 'rmse', 'persistence_mse', 'persistence_mae',
+    fields = ['dataset', 'variant', 'status', 'seed', 'protocol', 'history_steps', 'forecast_steps',
+              'history_seconds', 'forecast_seconds', 'step_seconds',
+              'mse', 'mae', 'rmse', 'persistence_mse', 'persistence_mae',
               'best_epoch', 'metric_scale', 'metric_reduction', 'smoke_test', 'log', 'metrics']
     rows = []
     by_name = {plan['dataset']: plan for plan in plans}
@@ -289,7 +327,8 @@ def main(argv=None):
         for job in jobs:
             plan = by_name[job['dataset']]
             log_path = output/f'{job["dataset"]}_{job["variant"]}.log'
-            row = {key: plan[key] for key in ('dataset', 'history_steps', 'forecast_steps', 'step_seconds')}
+            row = {key: plan[key] for key in ('dataset', 'protocol', 'history_steps', 'forecast_steps',
+                'history_seconds', 'forecast_seconds', 'step_seconds')}
             row.update(variant=job['variant'], seed=args.seed, smoke_test=args.smoke,
                        log=str(log_path), metrics=str(output/job['dataset']/job['variant']/'metrics.json'))
             print('\n'+shlex.join(job['command']), flush=True)

@@ -22,6 +22,8 @@ from .prepare import sha256
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config', help='JSON preset; explicit command-line values override it')
+    p.add_argument('--task-protocol', default='custom',
+        help='Experiment task label recorded in the manifest; does not imply full paper reproduction')
     p.add_argument('--data-path')
     p.add_argument('--targets', nargs='+', default=list(DIST_TARGETS))
     p.add_argument('--exog', nargs='+', default=list(DIST_EXOG))
@@ -166,6 +168,13 @@ def main(argv=None):
     model = build_model(config, patterns).to(args.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     manifest = {'args': vars(args), 'model_config': asdict(config), 'normalization': norm,
+        'forecast_task': {'protocol': args.task_protocol, 'history_seconds': args.history,
+            'forecast_seconds': args.forecast, 'patch_seconds': args.patch_seconds,
+            'history_patches': config.history_patches, 'future_patches': config.future_patches,
+            'window_alignment_only': args.task_protocol in ('dataset-short', 'dataset-long'),
+            'data_protocol': 'irregular observations, disjoint records; not TFB rolling',
+            'record_split': args.split,
+            'chronological_ratios': [0.6, 0.2, 0.2] if args.split == 'chronological' else None},
         'evaluation_protocol': evaluation_protocol(eval_statistics),
         'data_sha256': sha256(args.data_path),
         'record_ids': {name: [records.records[i][0] for i in ids] for name, ids in splits.items()},
