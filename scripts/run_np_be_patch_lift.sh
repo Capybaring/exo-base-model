@@ -13,8 +13,8 @@ COMMON_ARGS=(
   --patch-encoder ttcn
   --task-protocol dataset-short
   --history 604800 --forecast 86400
-  --patch-seconds 43200 --patch-stride 43200
-  --sample-stride 43200
+  --patch-seconds 21600 --patch-stride 21600
+  --sample-stride 21600
   --lag-estimator fft --refiner-mode global
   --split chronological --normalization train
   --batch-size 64 --epochs 100 --patience 10
